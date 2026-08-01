@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -22,7 +23,13 @@ from connx_rest_app import create_app
 
 ROOT = Path(__file__).resolve().parents[1]
 AXE_PATH = ROOT / "tests" / "vendor" / "axe.min.js"
-BASELINE_DIR = ROOT / "tests" / "visual_baselines"
+BASELINE_ROOT = ROOT / "tests" / "visual_baselines"
+BASELINE_FLAVOR = os.environ.get(
+    "VISUAL_BASELINE_FLAVOR", "linux" if sys.platform.startswith("linux") else "macos"
+)
+BASELINE_DIR = (
+    BASELINE_ROOT if BASELINE_FLAVOR == "macos" else BASELINE_ROOT / BASELINE_FLAVOR
+)
 ACTUAL_DIR = ROOT / "tests" / "visual_actual"
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
