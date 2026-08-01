@@ -980,7 +980,7 @@ class ConnxRestAppTests(unittest.TestCase):
         client = app.test_client()
         healthy = client.get(
             "/healthz",
-            base_url="http://internal:8000",
+            base_url="http://internal.test:8000",
             headers={
                 "X-Forwarded-For": "192.0.2.10",
                 "X-Forwarded-Proto": "https",

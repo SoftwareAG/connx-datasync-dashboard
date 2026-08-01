@@ -27,9 +27,7 @@ BASELINE_ROOT = ROOT / "tests" / "visual_baselines"
 BASELINE_FLAVOR = os.environ.get(
     "VISUAL_BASELINE_FLAVOR", "linux" if sys.platform.startswith("linux") else "macos"
 )
-BASELINE_DIR = (
-    BASELINE_ROOT if BASELINE_FLAVOR == "macos" else BASELINE_ROOT / BASELINE_FLAVOR
-)
+BASELINE_DIR = BASELINE_ROOT / BASELINE_FLAVOR
 ACTUAL_DIR = ROOT / "tests" / "visual_actual"
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
@@ -266,6 +264,12 @@ class ConnxBrowserUITests(unittest.TestCase):
               document.querySelectorAll('time[data-timestamp]').forEach((item) => {
                 item.textContent = 'Jul 28, 2026, 6:30 AM';
               });
+              document.querySelectorAll('[role="alert"]').forEach((item) => {
+                item.textContent = item.textContent.replace(
+                  /Reference [0-9a-f]{12}[.]/,
+                  'Reference fixture-reference.'
+                );
+              });
             }
             """
         )
@@ -418,21 +422,19 @@ class ConnxBrowserUITests(unittest.TestCase):
         navigation_button.click()
         navigation = page.locator("#primaryNavigation")
         expect(navigation).to_be_visible()
-        page.wait_for_timeout(400)
-        self.assertTrue(page.evaluate("document.activeElement.closest('#primaryNavigation') !== null"))
+        expect(navigation).to_be_focused()
         page.keyboard.press("Escape")
         expect(navigation).to_be_hidden()
-        self.assertTrue(navigation_button.evaluate("el => el === document.activeElement"))
+        expect(navigation_button).to_be_focused()
 
         details_button = page.get_by_role("button", name="View details").first
         details_button.click()
         details = page.locator("#recordDetails")
         expect(details).to_be_visible()
-        page.wait_for_timeout(400)
-        self.assertTrue(page.evaluate("document.activeElement.closest('#recordDetails') !== null"))
+        expect(details).to_be_focused()
         page.keyboard.press("Escape")
         expect(details).to_be_hidden()
-        self.assertTrue(details_button.evaluate("el => el === document.activeElement"))
+        expect(details_button).to_be_focused()
 
         # A 640 CSS-pixel viewport is the reflow equivalent of a 1280px-wide
         # browser at 200% zoom, without relying on Chromium-only CSS zoom.
@@ -451,12 +453,10 @@ class ConnxBrowserUITests(unittest.TestCase):
         delete_trigger.click()
         modal = page.get_by_role("dialog")
         expect(modal).to_be_visible()
-        page.wait_for_timeout(400)
-        self.assertTrue(page.evaluate("document.activeElement.closest('.modal') !== null"))
+        expect(modal).to_be_focused()
         page.keyboard.press("Escape")
         expect(modal).to_be_hidden()
-        page.wait_for_timeout(400)
-        self.assertTrue(delete_trigger.evaluate("el => el === document.activeElement"))
+        expect(delete_trigger).to_be_focused()
 
     def test_help_about_responsive_content_links_and_focus(self):
         for breakpoint in BREAKPOINTS:
@@ -510,9 +510,8 @@ class ConnxBrowserUITests(unittest.TestCase):
 
                 page.keyboard.press("Escape")
                 expect(panel).to_be_hidden()
-                page.wait_for_timeout(400)
                 expected_focus = navigation_button if breakpoint != "desktop" else help_trigger
-                self.assertTrue(expected_focus.evaluate("el => el === document.activeElement"))
+                expect(expected_focus).to_be_focused()
                 expect(page.get_by_label("Search item")).to_have_value("UNAPPLIED FILTER")
 
         page = self.new_page("desktop")
@@ -520,9 +519,8 @@ class ConnxBrowserUITests(unittest.TestCase):
         context_trigger = page.get_by_role("button", name="Open AI analysis help")
         context_trigger.click()
         expect(page.locator("#helpAbout")).to_be_visible()
-        page.wait_for_timeout(450)
-        self.assertIn("show", page.locator("#helpAi").get_attribute("class"))
-        self.assertEqual(page.evaluate("document.activeElement.id"), "help-ai")
+        expect(page.locator("#helpAi")).to_be_visible()
+        expect(page.locator("#help-ai")).to_be_focused()
 
     def test_visual_regression_states(self):
         page = self.new_page("desktop")
@@ -540,7 +538,13 @@ class ConnxBrowserUITests(unittest.TestCase):
 
         self.state["mode"] = "partial"
         page.reload()
-        self.assert_visual(page, "dashboard-partial-outage")
+        groups_card = page.get_by_role(
+            "heading", name="Groups — last sync"
+        ).locator("xpath=ancestor::article[1]")
+        expect(groups_card.get_by_role("alert")).to_contain_text(
+            "Data is temporarily unavailable."
+        )
+        self.assert_visual(page, "dashboard-partial-outage", groups_card)
 
         self.state["mode"] = "failures"
         page.reload()

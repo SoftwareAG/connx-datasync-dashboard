@@ -51,11 +51,11 @@ UPDATE_VISUAL_BASELINES=1 \
 
 Include the reviewed baseline changes in the pull request and describe the
 visual difference. Do not raise the pixel threshold to hide instability.
-The checked-in root baselines are for macOS development. CI uses the
-`tests/visual_baselines/linux/` set because browser font rendering differs by
-operating system. Generate Linux baselines with the locked Playwright version
-and an Ubuntu environment; never copy macOS images into the Linux set merely to
-make CI pass.
+The checked-in baselines are separated into
+`tests/visual_baselines/macos/` and `tests/visual_baselines/linux/` because
+browser font rendering differs by operating system. Generate Linux baselines
+with the locked Playwright version and an Ubuntu environment; never copy macOS
+images into the Linux set merely to make CI pass.
 
 To update Linux baselines, open the GitHub Actions **CI** workflow, choose
 **Run workflow**, enable **Generate reviewed Linux visual baselines as an
