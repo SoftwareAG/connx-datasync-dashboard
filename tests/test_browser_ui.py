@@ -96,6 +96,7 @@ class ConnxBrowserUITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tempdir.cleanup)
         cls.state = {"mode": "failures", "slow_ai": False}
         cls.release_ai = threading.Event()
         cls.request_patch = patch(
@@ -105,7 +106,9 @@ class ConnxBrowserUITests(unittest.TestCase):
             "connx_rest_app.request_ai_analysis", side_effect=cls.fake_ai_analysis
         )
         cls.request_patch.start()
+        cls.addClassCleanup(cls.request_patch.stop)
         cls.ai_patch.start()
+        cls.addClassCleanup(cls.ai_patch.stop)
 
         cls.app = create_app()
         cls.app.config.update(
@@ -137,21 +140,15 @@ class ConnxBrowserUITests(unittest.TestCase):
         )
         cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.server_thread.start()
+        cls.addClassCleanup(cls.server_thread.join, timeout=5)
+        cls.addClassCleanup(cls.server.shutdown)
         cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
 
         cls.playwright = sync_playwright().start()
+        cls.addClassCleanup(cls.playwright.stop)
         cls.browser = cls.playwright.chromium.launch(headless=True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.release_ai.set()
-        cls.browser.close()
-        cls.playwright.stop()
-        cls.server.shutdown()
-        cls.server_thread.join(timeout=5)
-        cls.ai_patch.stop()
-        cls.request_patch.stop()
-        cls.tempdir.cleanup()
+        cls.addClassCleanup(cls.browser.close)
+        cls.addClassCleanup(cls.release_ai.set)
 
     def setUp(self):
         self.state.update(mode="failures", slow_ai=False)
