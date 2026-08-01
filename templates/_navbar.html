@@ -1,0 +1,54 @@
+{% from 'macros.html' import icon %}
+<nav class="navbar navbar-expand-lg navbar-dark app-navbar sticky-top" aria-label="Primary navigation">
+  <div class="container-fluid px-lg-4">
+    <a class="navbar-brand d-flex align-items-center gap-2 fw-bold" href="{{ dashboard_url or url_for('jobs') }}">
+      <span class="brand-mark">{{ icon('activity', 21) }}</span>
+      <span>CONNX <span class="fw-normal opacity-75">Operations</span></span>
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="offcanvas" data-bs-target="#primaryNavigation" aria-controls="primaryNavigation" aria-label="Open navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="offcanvas offcanvas-end text-bg-dark" tabindex="-1" id="primaryNavigation" aria-labelledby="primaryNavigationLabel">
+      <div class="offcanvas-header border-bottom border-secondary">
+        <h2 class="offcanvas-title h5" id="primaryNavigationLabel">CONNX DataSync Operations</h2>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Close navigation"></button>
+      </div>
+      <div class="offcanvas-body align-items-lg-center">
+        <ul class="navbar-nav me-auto mb-3 mb-lg-0">
+          <li class="nav-item"><a class="nav-link{% if dashboard_page %} active{% endif %}" {% if dashboard_page %}aria-current="page"{% endif %} href="{{ dashboard_url or url_for('jobs') }}">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link{% if history_page %} active{% endif %}" {% if history_page %}aria-current="page"{% endif %} href="{{ url_for('analysis_history') }}">Analysis history</a></li>
+          <li class="nav-item"><button class="nav-link" type="button" data-help-open>{{ icon('info', 16) }} Help &amp; About</button></li>
+        </ul>
+        <div class="d-flex flex-column flex-lg-row align-items-lg-center gap-2">
+          <span class="badge rounded-pill text-bg-light server-pill" title="{{ base_url }}"><span class="status-dot bg-success me-1" aria-hidden="true"></span>{{ base_url }}</span>
+          {% if dashboard_page %}
+          <div class="form-check form-switch text-nowrap mb-0 ms-lg-2">
+            <input class="form-check-input" type="checkbox" role="switch" id="auto-refresh">
+            <label class="form-check-label small" for="auto-refresh">Auto <span data-refresh-countdown>Off</span></label>
+          </div>
+          <button class="btn btn-sm btn-link text-light px-1" type="button" data-bs-toggle="tooltip" title="Reload every 30 seconds; pauses while you edit or have a panel open." aria-label="About auto-refresh">{{ icon('info', 16) }}</button>
+          {% endif %}
+          <button class="btn btn-sm btn-outline-light" type="button" data-theme-toggle aria-label="Toggle color theme" title="Toggle color theme">{{ icon('moon', 17) }}</button>
+          <form method="post" action="{{ url_for('logout') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-sm btn-outline-light text-nowrap" type="submit">{{ icon('logout', 17) }} Sign out</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</nav>
+{% if dashboard_page %}
+<div class="section-nav sticky-top">
+  <div class="container-fluid px-lg-4 py-2">
+    <nav class="nav nav-pills gap-1" aria-label="Dashboard sections">
+      <a class="nav-link" href="#overview">Overview</a>
+      <a class="nav-link" href="#operations">Operations</a>
+      <a class="nav-link" href="#history">History</a>
+      <a class="nav-link" href="#ai">AI insights</a>
+      <a class="nav-link" href="#assets">Assets</a>
+    </nav>
+  </div>
+</div>
+{% endif %}
+{% include '_help_about.html' %}

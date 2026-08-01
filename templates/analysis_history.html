@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% from 'macros.html' import icon, status_badge %}
+{% set history_page = true %}
+{% block title %}AI analysis history · CONNX Operations{% endblock %}
+{% block navbar %}{% include '_navbar.html' %}{% endblock %}
+{% block content %}
+<div class="page-shell">
+  <header class="d-flex flex-column flex-md-row justify-content-between align-items-md-end gap-3 mb-4">
+    <div>
+      <p class="eyebrow mb-1">AI insights</p>
+      <h1 class="display-6 fw-bold page-heading mb-2">Analysis history</h1>
+      <p class="text-body-secondary mb-0">Saved recommendations retained for {{ retention_days }} days for this authenticated user.</p>
+    </div>
+    <a class="btn btn-primary" href="{{ dashboard_url }}#ai">{{ icon('ai', 17) }} Return to AI insights</a>
+  </header>
+
+  <section class="card surface filter-card mb-4" aria-labelledby="history-filter-heading">
+    <div class="card-body"><h2 class="h6 mb-3" id="history-filter-heading">Filter saved analyses</h2><form class="row g-3 align-items-end" method="get" data-loading-form><div class="col-12 col-md-6"><label class="form-label" for="analysis-search">Search</label><input class="form-control" id="analysis-search" name="search" value="{{ search }}" placeholder="Summary, finding, or deployment…"></div><div class="col-7 col-md-3"><label class="form-label" for="analysis-severity">Severity</label><select class="form-select" id="analysis-severity" name="severity"><option value="">All severities</option>{% for value in ('critical', 'high', 'medium', 'low', 'informational') %}<option value="{{ value }}" {% if severity == value %}selected{% endif %}>{{ value|title }}</option>{% endfor %}</select></div><div class="col-5 col-md-3 d-flex gap-2"><button class="btn btn-primary flex-grow-1" type="submit" data-loading-label="Filtering…">Apply</button><a class="btn btn-outline-secondary" href="{{ url_for('analysis_history') }}">Reset</a></div></form><p class="small text-body-secondary mb-0 mt-3">{{ pagination.total_records }} matching analyses</p></div>
+  </section>
+
+  {% if records %}
+  <div class="row g-3">
+    {% for record in records %}
+    <div class="col-12">
+      <article class="card surface history-record">
+        <div class="card-body p-4">
+          <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+            <div class="flex-grow-1">
+              <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                {% if record.analysis.structured %}{{ status_badge(record.analysis.overall_severity) }}{% endif %}
+                <span class="badge bg-secondary-subtle text-secondary-emphasis border">{{ record.deployment }}</span>
+                <span class="small text-body-secondary">{{ icon('clock', 15) }} <time data-timestamp="{{ record.created_at }}">{{ record.created_at }}</time></span>
+              </div>
+              <h2 class="h5 mb-2">{% if record.analysis.structured %}{{ record.analysis.executive_summary }}{% else %}{{ record.analysis.raw_text[:240] }}{% endif %}</h2>
+              <div class="d-flex flex-wrap gap-3 small text-body-secondary">
+                <span><strong class="text-body" data-number="{{ record.stats.total }}">{{ record.stats.total }}</strong> jobs</span>
+                <span><strong class="text-danger" data-number="{{ record.stats.failures }}">{{ record.stats.failures }}</strong> failed</span>
+                <span><strong class="text-body" data-number="{{ record.stats.affected_objects }}">{{ record.stats.affected_objects }}</strong> objects</span>
+              </div>
+            </div>
+            <div class="d-flex flex-wrap align-items-start gap-2">
+              <a class="btn btn-primary btn-sm" href="{{ url_for('select_analysis', analysis_id=record.id) }}">Open analysis</a>
+              <div class="btn-group" role="group" aria-label="Export analysis">
+                <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_analysis', analysis_id=record.id) }}">Markdown</a>
+                <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('export_analysis_pdf', analysis_id=record.id) }}">PDF</a>
+              </div>
+              <button class="btn btn-outline-danger btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#deleteAnalysis{{ record.id }}">Delete</button>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
+    <div class="modal fade" id="deleteAnalysis{{ record.id }}" tabindex="-1" aria-labelledby="deleteAnalysisLabel{{ record.id }}" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-header"><h2 class="modal-title fs-5" id="deleteAnalysisLabel{{ record.id }}">Delete this analysis?</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">This permanently removes the analysis generated on <time data-timestamp="{{ record.created_at }}">{{ record.created_at }}</time>. Export it first if it may be needed later.</div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><form method="post" action="{{ url_for('delete_analysis_route', analysis_id=record.id) }}" data-loading-form><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="btn btn-danger" type="submit" data-loading-label="Deleting…">Delete analysis</button></form></div>
+      </div></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% if pagination.total_pages > 1 %}<nav class="d-flex justify-content-between align-items-center mt-4" aria-label="Analysis history pages"><a class="btn btn-outline-secondary {% if not pagination.previous_url %}disabled{% endif %}" {% if pagination.previous_url %}href="{{ pagination.previous_url }}"{% else %}aria-disabled="true"{% endif %}>Previous</a><span class="small text-body-secondary">Page {{ pagination.page }} of {{ pagination.total_pages }}</span><a class="btn btn-outline-secondary {% if not pagination.next_url %}disabled{% endif %}" {% if pagination.next_url %}href="{{ pagination.next_url }}"{% else %}aria-disabled="true"{% endif %}>Next</a></nav>{% endif %}
+  {% else %}
+  <div class="card surface"><div class="empty-state"><span class="section-icon">{{ icon('history', 24) }}</span><h2 class="h5 text-body">{% if search or severity %}No matching analyses{% else %}No saved analyses yet{% endif %}</h2><p>{% if search or severity %}Try a broader search or reset the filters.{% else %}Run an AI analysis from the dashboard and it will appear here.{% endif %}</p>{% if search or severity %}<a class="btn btn-outline-primary" href="{{ url_for('analysis_history') }}">Reset filters</a>{% else %}<a class="btn btn-primary" href="{{ dashboard_url }}#ai">Analyze job history</a>{% endif %}</div></div>
+  {% endif %}
+</div>
+{% endblock %}

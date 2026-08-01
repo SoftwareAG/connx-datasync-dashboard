@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Reject whitespace errors
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git show --check --format= HEAD
+          fi
+
+  server:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Run server tests
+        run: python -W error -m unittest tests.test_connx_rest_app -v
+      - name: Validate Gunicorn configuration
+        run: gunicorn --check-config --config gunicorn.conf.py wsgi:app
+      - name: Scan first-party Python
+        if: matrix.python-version == '3.13'
+        run: bandit -c pyproject.toml -r connx_ai.py connx_platform.py connx_rest_app.py wsgi.py
+      - name: Audit locked dependencies
+        if: matrix.python-version == '3.13'
+        run: pip-audit -r requirements.lock
+      - name: Review dependency licenses
+        if: matrix.python-version == '3.13'
+        run: pip-licenses --format=plain
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Run browser tests
+        run: python -W error -m unittest tests.test_browser_ui -v
+      - name: Upload visual failures
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: visual-failures
+          path: tests/visual_actual/
+          if-no-files-found: ignore
+          retention-days: 7

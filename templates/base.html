@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#102a43">
+  <title>{% block title %}CONNX Operations Console{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap/bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body data-ai-job-status="{{ ai_job_status or '' }}">
+  <a class="visually-hidden-focusable skip-link" href="#main-content">Skip to main content</a>
+  {% block navbar %}{% endblock %}
+  <main id="main-content" tabindex="-1">{% block content %}{% endblock %}</main>
+  <div class="toast-container position-fixed bottom-0 end-0 p-3" aria-live="polite" aria-atomic="true">
+    {% for message in get_flashed_messages() %}
+      <div class="toast show shadow-sm" role="status" data-bs-autohide="false">
+        <div class="toast-header">
+          <span class="status-dot bg-primary me-2" aria-hidden="true"></span>
+          <strong class="me-auto">CONNX Operations</strong>
+          <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Dismiss"></button>
+        </div>
+        <div class="toast-body">{{ message }}</div>
+      </div>
+    {% endfor %}
+  </div>
+  <script src="{{ url_for('static', filename='vendor/bootstrap/bootstrap.bundle.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
