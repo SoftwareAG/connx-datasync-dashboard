@@ -45,6 +45,62 @@ The Help & About panel shows only safe, non-secret metadata. Optional version,
 build, support, documentation, and privacy values are documented in
 `.env.example`.
 
+### Self-signed certificates for testing and evaluation
+
+For testing or evaluation against a CONNX REST service that uses a self-signed
+certificate or an internal certificate authority, first copy the example
+configuration and edit the ignored local file:
+
+```bash
+cp .env.example .env
+```
+
+The preferred approach is to keep TLS verification enabled and configure
+Requests to trust the issuing certificate authority. Use an absolute path to a
+PEM file containing the CA certificate:
+
+```dotenv
+CONNX_ENVIRONMENT=development
+CONNX_BASE_URL=https://your-connx-rest-endpoint
+CONNX_VERIFY_TLS=true
+CONNX_ALLOW_INSECURE_TLS=false
+REQUESTS_CA_BUNDLE=/absolute/path/to/testing-ca.pem
+```
+
+If a trusted CA bundle is not available, verification can be disabled only for
+isolated development or evaluation environments:
+
+```dotenv
+CONNX_ENVIRONMENT=development
+CONNX_BASE_URL=https://your-connx-rest-endpoint
+CONNX_ALLOW_INSECURE_TLS=true
+CONNX_VERIFY_TLS=false
+```
+
+Restart the application after changing `.env`. Setting
+`CONNX_ALLOW_INSECURE_TLS=true` enables the **Verify TLS certificate** switch
+on the login page; `CONNX_VERIFY_TLS` controls its initial state. An operator
+can switch verification on or off before signing in.
+
+Disabling verification makes the connection vulnerable to server
+impersonation and interception. Do not use it with production credentials,
+production data, or across an untrusted network.
+
+Production must use a currently valid certificate whose hostname matches the
+CONNX REST endpoint and whose complete trust chain is available to the
+application host. Enforce verification with:
+
+```dotenv
+CONNX_ENVIRONMENT=production
+CONNX_BASE_URL=https://your-production-connx-rest-endpoint
+CONNX_VERIFY_TLS=true
+CONNX_ALLOW_INSECURE_TLS=false
+```
+
+Production startup fails closed if TLS verification is disabled or the
+insecure-development override is enabled. See
+[`DEPLOYMENT.md`](DEPLOYMENT.md) for the other required production settings.
+
 ## Tests
 
 ```bash
