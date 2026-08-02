@@ -32,10 +32,67 @@ from connx_platform import (
     DurableAnalysisJobManager,
     consume_analysis_quota,
     consume_login_attempt,
+    load_connx_refresh_token,
     load_connx_token,
     read_secret,
     store_connx_token,
 )
+
+
+DATASYNC_ENV_PAYLOAD = {
+    "isconnected": True,
+    "CDDName": "DemoCDD",
+    "dataSyncAvailable": True,
+    "transformsAvailable": True,
+    "transformLicenseMessages": [],
+}
+
+SCHEDULES_PAYLOAD = {
+    "ScheduleItems": [
+        {
+            "Name": "Nightly orders",
+            "ItemType": "Table",
+            "ItemName": "orders",
+            "SyncType": "Incremental",
+            "DateFrequency": "Daily",
+            "TimeFrequency": "Once",
+            "Enabled": True,
+            "UseTriggerFile": True,
+            "TriggerFileName": "/redacted/by/app",
+            "BeforeSyncTask": "/redacted/by/app",
+            "EndDate": "",
+        }
+    ],
+    "TotalNumberOfMatches": 1,
+}
+
+ALLOBJECTS_PAYLOAD = {
+    "ItemList": [
+        {"ItemType": "Table", "ItemName": "orders"},
+        {"ItemType": "Group", "ItemName": "daily group"},
+        {"ItemType": "Transform", "ItemName": "orders transform"},
+    ],
+    "TotalNumberOfMatches": 3,
+}
+
+CONFIG_SETTINGS_PAYLOAD = {
+    "maxworkerthreads": 8,
+    "historydays": 30,
+    "batchsize": 5000,
+    "fullreloadthreshold": 75,
+    "retryfailedsyncs": True,
+    "retrycount": 3,
+    "smtpserver": "smtp.internal.example",
+    "ondemandscriptdirectory": "/private/scripts",
+}
+
+SERVER_ENV_PAYLOAD = {
+    "version": "14.8.0",
+    "currentTime": "2026-08-01T18:00:00Z",
+    "timezone": "UTC",
+    "serverHomeDirectory": "/private/connx",
+    "licenseServerName": "license.internal.example",
+}
 
 
 class ConnxRestAppTests(unittest.TestCase):
@@ -49,6 +106,8 @@ class ConnxRestAppTests(unittest.TestCase):
             TESTING=True,
             SECRET_KEY="test",
             CONNX_BASE_URL="https://connx.test:9500",
+            CONNX_VERIFY_TLS=True,
+            CONNX_ALLOW_INSECURE_TLS=False,
             ANALYSIS_DB_PATH=database_path,
             CSRF_ENABLED=False,
         )
@@ -67,7 +126,7 @@ class ConnxRestAppTests(unittest.TestCase):
     def test_login_stores_access_token(self):
         response = Mock(status_code=200)
         response.raise_for_status.return_value = None
-        response.json.return_value = {"accessToken": "abc"}
+        response.json.return_value = {"accessToken": "abc", "refreshToken": "refresh-abc"}
 
         with patch("connx_rest_app.requests.request", return_value=response) as send:
             client = self.make_app().test_client()
@@ -85,11 +144,21 @@ class ConnxRestAppTests(unittest.TestCase):
         self.assertEqual(
             load_connx_token(client.application.config["ANALYSIS_DB_PATH"], handle), "abc"
         )
+        self.assertEqual(
+            load_connx_refresh_token(
+                client.application.config["ANALYSIS_DB_PATH"], handle
+            ),
+            "refresh-abc",
+        )
         self.assertNotIn("abc", result.headers["Set-Cookie"])
+        self.assertNotIn("refresh-abc", result.headers["Set-Cookie"])
 
         replacement = Mock(status_code=200)
         replacement.raise_for_status.return_value = None
-        replacement.json.return_value = {"accessToken": "replacement-token"}
+        replacement.json.return_value = {
+            "accessToken": "replacement-token",
+            "refreshToken": "replacement-refresh",
+        }
         with patch("connx_rest_app.requests.request", return_value=replacement):
             client.post(
                 "/login", data={"username": "DOMAIN\\user", "password": "secret"}
@@ -106,7 +175,27 @@ class ConnxRestAppTests(unittest.TestCase):
             ),
             "replacement-token",
         )
-        client.post("/logout")
+        self.assertEqual(
+            load_connx_refresh_token(
+                client.application.config["ANALYSIS_DB_PATH"], replacement_handle
+            ),
+            "replacement-refresh",
+        )
+        logout_response = Mock(status_code=200)
+        logout_response.raise_for_status.return_value = None
+        with patch("connx_rest_app.requests.request", return_value=logout_response) as send:
+            client.post("/logout")
+        self.assertEqual(
+            send.call_args.args[1],
+            "https://connx.test:9500/api/svr/security/logout",
+        )
+        self.assertEqual(
+            send.call_args.kwargs["json"],
+            {
+                "accessToken": "replacement-token",
+                "refreshToken": "replacement-refresh",
+            },
+        )
         self.assertIsNone(
             load_connx_token(
                 client.application.config["ANALYSIS_DB_PATH"], replacement_handle
@@ -137,6 +226,70 @@ class ConnxRestAppTests(unittest.TestCase):
         self.assertIn("Secure", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Lax", cookie)
+
+    def test_connx_call_refreshes_expired_access_token_once(self):
+        expired = Mock(status_code=401)
+        expired.raise_for_status.side_effect = requests.HTTPError("expired")
+        refresh = Mock(status_code=200)
+        refresh.raise_for_status.return_value = None
+        refresh.json.return_value = {
+            "accessToken": "fresh-access",
+            "refreshToken": "fresh-refresh",
+        }
+        history = Mock(status_code=200)
+        history.raise_for_status.return_value = None
+        history.json.return_value = {
+            "JobList": [{"success": "true", "itemname": "orders"}]
+        }
+
+        app = self.make_app()
+        client = app.test_client()
+        handle = store_connx_token(
+            app.config["ANALYSIS_DB_PATH"],
+            "expired-access",
+            refresh_token="old-refresh",
+            ttl_seconds=app.config["CONNX_SESSION_TTL_SECONDS"],
+        )
+        with client.session_transaction() as state:
+            state["connx_session_handle"] = handle
+        with patch(
+            "connx_rest_app.requests.request",
+            side_effect=[expired, refresh, history],
+        ) as send:
+            result = client.get("/jobs/history.csv")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            [call.args[1] for call in send.call_args_list],
+            [
+                "https://connx.test:9500/api/status/completedjobs",
+                "https://connx.test:9500/api/svr/security/refreshtoken",
+                "https://connx.test:9500/api/status/completedjobs",
+            ],
+        )
+        self.assertEqual(
+            send.call_args_list[0].kwargs["headers"]["Authorization"],
+            "bearer expired-access",
+        )
+        self.assertEqual(
+            send.call_args_list[1].kwargs["json"],
+            {"refreshToken": "old-refresh"},
+        )
+        self.assertEqual(
+            send.call_args_list[2].kwargs["headers"]["Authorization"],
+            "bearer fresh-access",
+        )
+        with client.session_transaction() as state:
+            replacement_handle = state["connx_session_handle"]
+        self.assertNotEqual(handle, replacement_handle)
+        self.assertEqual(
+            load_connx_token(app.config["ANALYSIS_DB_PATH"], replacement_handle),
+            "fresh-access",
+        )
+        self.assertEqual(
+            load_connx_refresh_token(app.config["ANALYSIS_DB_PATH"], replacement_handle),
+            "fresh-refresh",
+        )
 
     def test_production_configuration_fails_closed(self):
         handle, database_path = tempfile.mkstemp(suffix=".db")
@@ -301,11 +454,16 @@ class ConnxRestAppTests(unittest.TestCase):
         responses = []
         for payload in (
             {"RunningThreads": []},
+            DATASYNC_ENV_PAYLOAD,
             {"JobList": [{"itemname": "orders", "success": "true"}]},
             {"JobList": [], "TotalNumberOfMatches": 0},
             {"TableList": []},
             {"GroupList": []},
             {"TransformList": []},
+            SCHEDULES_PAYLOAD,
+            ALLOBJECTS_PAYLOAD,
+            CONFIG_SETTINGS_PAYLOAD,
+            SERVER_ENV_PAYLOAD,
         ):
             item = Mock(status_code=200)
             item.raise_for_status.return_value = None
@@ -366,12 +524,43 @@ class ConnxRestAppTests(unittest.TestCase):
     def test_jobs_dashboard_requests_documented_status_endpoints(self):
         responses = []
         for payload in (
-            {"ActiveSyncs": 1, "QueuedSyncs": 2, "CompletedSyncs": 3, "RecordsPerSecond": 4, "DataVolumeVelocity": 1.5, "RunningThreads": []},
-            {"JobList": [{"itemname": "orders", "success": "true"}]},
+            {
+                "ActiveSyncs": 1,
+                "QueuedSyncs": 2,
+                "CompletedSyncs": 3,
+                "RecordsPerSecond": 4,
+                "RecordsPerSecondHighWater": 12,
+                "DataVolumeVelocity": 1.5,
+                "DataVolumeVelocityHighWater": 3.5,
+                "RunningThreads": [],
+                "RunningProcesses": [
+                    {
+                        "itemname": "orders",
+                        "itemtype": "Table",
+                        "rowsprocessed": 64000,
+                        "processid": "99",
+                        "starttime": "2026-08-01T12:00:00Z",
+                        "elapsedtime": "00:01:00",
+                        "estimatedcompletiontime": "2026-08-01T12:05:00Z",
+                    }
+                ],
+            },
+            DATASYNC_ENV_PAYLOAD,
+            {
+                "JobList": [{"itemname": "orders", "success": "true"}],
+                "TotalNumberOfMatches": 101,
+                "NumberOfSuccess": 99,
+                "NumberOfFailures": 2,
+                "LastPageFlag": False,
+            },
             {"JobList": [], "TotalNumberOfMatches": 0},
             {"TableList": []},
             {"GroupList": []},
             {"TransformList": []},
+            SCHEDULES_PAYLOAD,
+            ALLOBJECTS_PAYLOAD,
+            CONFIG_SETTINGS_PAYLOAD,
+            SERVER_ENV_PAYLOAD,
         ):
             response = Mock(status_code=200)
             response.raise_for_status.return_value = None
@@ -390,23 +579,120 @@ class ConnxRestAppTests(unittest.TestCase):
         self.assertIn(b'data-bs-target="#recordDetails"', result.data)
         self.assertIn(b'data-bs-toggle="tooltip"', result.data)
         self.assertIn(b"data-timezone", result.data)
+        self.assertIn(b"DataSync readiness", result.data)
+        self.assertIn(b"DemoCDD", result.data)
+        self.assertIn(b"CDD connection", result.data)
+        self.assertIn(b"Ready", result.data)
+        self.assertIn(b"Records/sec high-water", result.data)
+        self.assertIn(b"MB/sec high-water", result.data)
+        self.assertIn(b"64000", result.data)
+        self.assertIn(b"2026-08-01T12:05:00Z", result.data)
+        self.assertIn(b"Failures", result.data)
+        self.assertIn(b">2</div>", result.data)
+        self.assertIn(b"Planning insights", result.data)
+        self.assertIn(b"Nightly orders", result.data)
+        self.assertIn(b"Task hooks", result.data)
+        self.assertIn(b"Syncable objects", result.data)
+        self.assertIn(b"95th percentile duration", result.data)
+        self.assertIn(b"Max worker threads", result.data)
+        self.assertIn(b"14.8.0", result.data)
+        self.assertNotIn(b"/redacted/by/app", result.data)
+        self.assertNotIn(b"smtp.internal.example", result.data)
+        self.assertNotIn(b"/private/scripts", result.data)
+        self.assertNotIn(b"/private/connx", result.data)
+        self.assertNotIn(b"license.internal.example", result.data)
         self.assertIn(b"Previous", result.data)
+        self.assertIn(b"Next", result.data)
         self.assertTrue(
             all(
                 call.kwargs["headers"]["Authorization"] == "bearer abc"
                 for call in send.call_args_list
             )
         )
-        self.assertEqual(send.call_args_list[1].kwargs["params"], {"StatusSearchPattern": "success", "TimePeriod": "1 week", "PageNumber": 2, "PageSize": 100})
-        self.assertEqual(send.call_args_list[3].kwargs["params"], {"StatusSearchPattern": "success", "Pagination": "false"})
+        self.assertEqual(send.call_args_list[2].kwargs["params"], {"StatusSearchPattern": "success", "TimePeriod": "1 week", "PageNumber": 2, "PageSize": 100})
+        self.assertEqual(send.call_args_list[4].kwargs["params"], {"StatusSearchPattern": "success", "Pagination": "false"})
         self.assertEqual([call.args[1] for call in send.call_args_list], [
             "https://connx.test:9500/api/status/runningjobs",
+            "https://connx.test:9500/api/ds/env",
             "https://connx.test:9500/api/status/completedjobs",
             "https://connx.test:9500/api/status/completedjobs",
             "https://connx.test:9500/api/object/tableswithstatus",
             "https://connx.test:9500/api/object/groupswithstatus",
             "https://connx.test:9500/api/object/transformswithstatus",
+            "https://connx.test:9500/api/object/schedules",
+            "https://connx.test:9500/api/object/allobjects",
+            "https://connx.test:9500/api/config/settings",
+            "https://connx.test:9500/api/svr/env",
         ])
+
+    def test_datasync_environment_unavailable_does_not_block_dashboard(self):
+        unavailable = Mock(status_code=403)
+        unavailable.raise_for_status.side_effect = requests.HTTPError("403 forbidden")
+        responses = []
+        for payload in (
+            {"RunningThreads": []},
+            {"JobList": [{"itemname": "orders", "success": "true"}]},
+            {"JobList": [], "TotalNumberOfMatches": 0},
+            {"TableList": []},
+            {"GroupList": []},
+            {"TransformList": []},
+            SCHEDULES_PAYLOAD,
+            ALLOBJECTS_PAYLOAD,
+            CONFIG_SETTINGS_PAYLOAD,
+            SERVER_ENV_PAYLOAD,
+        ):
+            response = Mock(status_code=200)
+            response.raise_for_status.return_value = None
+            response.json.return_value = payload
+            responses.append(response)
+        responses.insert(1, unavailable)
+
+        client = self.make_app().test_client()
+        self.authenticate(client)
+        with patch("connx_rest_app.requests.request", side_effect=responses):
+            result = client.get("/jobs")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertIn(b"DataSync readiness", result.data)
+        self.assertIn(b"DataSync environment is unavailable", result.data)
+        self.assertIn(b"Completed job history", result.data)
+
+    def test_optional_swagger_panels_are_role_aware(self):
+        def denied(status_code: int) -> Mock:
+            response = Mock(status_code=status_code)
+            error = requests.HTTPError(f"{status_code} denied")
+            error.response = response
+            response.raise_for_status.side_effect = error
+            return response
+
+        responses = []
+        for payload in (
+            {"RunningThreads": []},
+            DATASYNC_ENV_PAYLOAD,
+            {"JobList": [{"itemname": "orders", "success": "true"}]},
+            {"JobList": [], "TotalNumberOfMatches": 0},
+            {"TableList": []},
+            {"GroupList": []},
+            {"TransformList": []},
+        ):
+            response = Mock(status_code=200)
+            response.raise_for_status.return_value = None
+            response.json.return_value = payload
+            responses.append(response)
+        responses.extend([denied(403), denied(404), denied(403), denied(401)])
+
+        client = self.make_app().test_client()
+        self.authenticate(client)
+        with patch("connx_rest_app.requests.request", side_effect=responses):
+            result = client.get("/jobs")
+
+        self.assertEqual(result.status_code, 200)
+        self.assertIn(b"Planning insights", result.data)
+        self.assertIn(b"Schedule health is not available", result.data)
+        self.assertIn(b"Syncable inventory is not available", result.data)
+        self.assertIn(b"DataSync configuration is not available", result.data)
+        self.assertIn(b"Server environment is not available", result.data)
+        self.assertIn(b"Completed job history", result.data)
 
     def test_history_export_returns_csv(self):
         response = Mock(status_code=200)
@@ -425,11 +711,16 @@ class ConnxRestAppTests(unittest.TestCase):
         responses = []
         for payload in (
             {"RunningThreads": []},
+            DATASYNC_ENV_PAYLOAD,
             {"JobList": [{"itemname": "orders", "success": "false", "error": "Timeout"}]},
             {"JobList": [], "TotalNumberOfMatches": 0},
             {"TableList": []},
             {"GroupList": []},
             {"TransformList": []},
+            SCHEDULES_PAYLOAD,
+            ALLOBJECTS_PAYLOAD,
+            CONFIG_SETTINGS_PAYLOAD,
+            SERVER_ENV_PAYLOAD,
         ):
             response = Mock(status_code=200)
             response.raise_for_status.return_value = None
@@ -528,11 +819,16 @@ class ConnxRestAppTests(unittest.TestCase):
         refresh_responses = []
         for payload in (
             {"RunningThreads": []},
+            DATASYNC_ENV_PAYLOAD,
             {"JobList": [{"itemname": "orders", "success": "false"}]},
             {"JobList": []},
             {"TableList": []},
             {"GroupList": []},
             {"TransformList": []},
+            SCHEDULES_PAYLOAD,
+            ALLOBJECTS_PAYLOAD,
+            CONFIG_SETTINGS_PAYLOAD,
+            SERVER_ENV_PAYLOAD,
         ):
             response = Mock(status_code=200)
             response.raise_for_status.return_value = None
@@ -634,11 +930,16 @@ class ConnxRestAppTests(unittest.TestCase):
         responses = []
         for payload in (
             {"RunningThreads": []},
+            DATASYNC_ENV_PAYLOAD,
             {"JobList": [{"itemname": "orders", "success": "false"}]},
             {"JobList": [], "TotalNumberOfMatches": 0},
             {"TableList": []},
             {"GroupList": []},
             {"TransformList": []},
+            SCHEDULES_PAYLOAD,
+            ALLOBJECTS_PAYLOAD,
+            CONFIG_SETTINGS_PAYLOAD,
+            SERVER_ENV_PAYLOAD,
         ):
             response = Mock(status_code=200)
             response.raise_for_status.return_value = None
@@ -792,10 +1093,66 @@ class ConnxRestAppTests(unittest.TestCase):
         self.assertEqual(client.post("/logout").status_code, 400)
         with client.session_transaction() as state:
             state["csrf_token"] = "valid-token"
+        logout_response = Mock(status_code=200)
+        logout_response.raise_for_status.return_value = None
+        with patch("connx_rest_app.requests.request", return_value=logout_response):
+            logout_status = client.post(
+                "/logout", data={"csrf_token": "valid-token"}
+            ).status_code
         self.assertEqual(
-            client.post("/logout", data={"csrf_token": "valid-token"}).status_code,
-            302,
+            logout_status, 302
         )
+
+    def test_history_trends_normalizes_connx_duration_formats_to_seconds(self):
+        trends = history_trends(
+            [
+                {
+                    "starttime": "2026-07-29 01:00",
+                    "success": "true",
+                    "duration": "1.5 sec",
+                    "processedrows": 1,
+                },
+                {
+                    "starttime": "2026-07-29 02:00",
+                    "success": "true",
+                    "duration": 2,
+                    "processedrows": 1,
+                },
+                {
+                    "starttime": "2026-07-29 03:00",
+                    "success": "true",
+                    "duration": "01:02",
+                    "processedrows": 1,
+                },
+                {
+                    "starttime": "2026-07-29 04:00",
+                    "success": "true",
+                    "duration": "01:02:03",
+                    "processedrows": 1,
+                },
+                {
+                    "starttime": "2026-07-29 05:00",
+                    "success": "true",
+                    "duration": "1.02:03:04",
+                    "processedrows": 1,
+                },
+                {
+                    "starttime": "2026-07-29 06:00",
+                    "success": "true",
+                    "duration": "",
+                    "processedrows": 1,
+                },
+                {
+                    "starttime": "2026-07-29 07:00",
+                    "success": "true",
+                    "duration": "not available",
+                    "processedrows": 1,
+                },
+            ]
+        )
+
+        expected_seconds = (1.5 + 2 + 62 + 3723 + 93784 + 0 + 0) / 7
+        self.assertEqual(trends[0]["average_duration"], round(expected_seconds, 1))
 
     def test_background_job_and_mounted_secret_helpers(self):
         manager = AnalysisJobManager(max_workers=1)

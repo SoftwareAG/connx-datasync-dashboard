@@ -21,7 +21,7 @@
 
 {% macro status_badge(value) -%}
   {% set normalized = value|string|lower %}
-  {% if normalized in ('true', '1', 'yes', 'success', 'healthy', 'resolved') %}
+  {% if normalized in ('true', '1', 'yes', 'success', 'healthy', 'resolved', 'available') %}
     <span class="badge bg-success-subtle border border-success-subtle text-success-emphasis status-badge">{{ icon('check', 14) }} {{ value }}</span>
   {% elif normalized in ('false', '0', 'no', 'failure', 'failed', 'critical', 'high', 'unavailable') %}
     <span class="badge bg-danger-subtle border border-danger-subtle text-danger-emphasis status-badge">{{ icon('x', 14) }} {{ value }}</span>

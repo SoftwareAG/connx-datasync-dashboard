@@ -133,6 +133,43 @@ def summarize_history(history: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def duration_seconds(value: Any) -> float:
+    """Normalize CONNX duration values to seconds for trend math."""
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value or "").strip()
+    if not text:
+        return 0
+
+    day_match = re.fullmatch(
+        r"(?P<days>\d+)\.(?P<hours>\d{1,2}):"
+        r"(?P<minutes>\d{1,2}):(?P<seconds>\d+(?:\.\d+)?)",
+        text,
+    )
+    if day_match:
+        return (
+            int(day_match.group("days")) * 86400
+            + int(day_match.group("hours")) * 3600
+            + int(day_match.group("minutes")) * 60
+            + float(day_match.group("seconds"))
+        )
+
+    parts = text.split(":")
+    if len(parts) in {2, 3} and all(
+        re.fullmatch(r"\d+(?:\.\d+)?", part.strip()) for part in parts
+    ):
+        numbers = [float(part.strip()) for part in parts]
+        if len(numbers) == 2:
+            minutes, seconds = numbers
+            return minutes * 60 + seconds
+        hours, minutes, seconds = numbers
+        return hours * 3600 + minutes * 60 + seconds
+
+    duration_match = re.search(r"\d+(?:\.\d+)?", text)
+    return float(duration_match.group(0)) if duration_match else 0
+
+
 def history_trends(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[str, dict[str, float]] = {}
     for row in history:
@@ -145,8 +182,7 @@ def history_trends(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
         bucket["total"] += 1
         if str(row.get("success", "")).lower() not in {"true", "1", "yes", "success"}:
             bucket["failures"] += 1
-        duration_match = re.search(r"\d+(?:\.\d+)?", str(row.get("duration", "0")))
-        bucket["duration"] += float(duration_match.group(0)) if duration_match else 0
+        bucket["duration"] += duration_seconds(row.get("duration", "0"))
         try:
             bucket["rows"] += int(row.get("processedrows") or 0)
         except (TypeError, ValueError):

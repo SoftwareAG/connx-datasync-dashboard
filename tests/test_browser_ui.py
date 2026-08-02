@@ -178,6 +178,16 @@ class ConnxBrowserUITests(unittest.TestCase):
         mode = cls.state["mode"]
         if mode == "partial" and path.endswith("/api/object/groupswithstatus"):
             return response({"error": "Fixture group endpoint unavailable"}, 503)
+        if path.endswith("/api/ds/env"):
+            return response(
+                {
+                    "isconnected": True,
+                    "CDDName": "BrowserFixtureCDD",
+                    "dataSyncAvailable": True,
+                    "transformsAvailable": True,
+                    "transformLicenseMessages": [],
+                }
+            )
         if path.endswith("/api/status/runningjobs"):
             return response(
                 {
@@ -222,6 +232,57 @@ class ConnxBrowserUITests(unittest.TestCase):
             return response({"GroupList": [], "TotalNumberOfMatches": 0})
         if path.endswith("/api/object/transformswithstatus"):
             return response({"TransformList": [], "TotalNumberOfMatches": 0})
+        if path.endswith("/api/object/schedules"):
+            return response(
+                {
+                    "ScheduleItems": [
+                        {
+                            "Name": "Nightly orders",
+                            "ItemType": "Table",
+                            "ItemName": "ORDERS_DB2",
+                            "SyncType": "Incremental",
+                            "DateFrequency": "Daily",
+                            "TimeFrequency": "Once",
+                            "Enabled": True,
+                            "UseTriggerFile": True,
+                            "BeforeSyncTask": "/private/scripts/before.cmd",
+                        }
+                    ],
+                    "TotalNumberOfMatches": 1,
+                }
+            )
+        if path.endswith("/api/object/allobjects"):
+            return response(
+                {
+                    "ItemList": [
+                        {"ItemType": "Table", "ItemName": "ORDERS_DB2"},
+                        {"ItemType": "Group", "ItemName": "MONTHLY_LOAD"},
+                        {"ItemType": "Transform", "ItemName": "ORDER_SUMMARY"},
+                    ],
+                    "TotalNumberOfMatches": 3,
+                }
+            )
+        if path.endswith("/api/config/settings"):
+            return response(
+                {
+                    "maxworkerthreads": 8,
+                    "historydays": 30,
+                    "batchsize": 5000,
+                    "retryfailedsyncs": True,
+                    "smtpserver": "smtp.fixture.internal",
+                    "ondemandscriptdirectory": "/private/scripts",
+                }
+            )
+        if path.endswith("/api/svr/env"):
+            return response(
+                {
+                    "version": "14.8.0",
+                    "currentTime": "2026-08-01T18:00:00Z",
+                    "timezone": "UTC",
+                    "serverHomeDirectory": "/private/connx",
+                    "licenseServerName": "license.fixture.internal",
+                }
+            )
         return response({"status": "ok"})
 
     @classmethod

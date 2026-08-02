@@ -28,12 +28,19 @@ from dotenv import load_dotenv
 from flask import Flask, Response, abort, flash, g, redirect, render_template, request, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from connx_ai import history_trends, redact_history, request_ai_analysis, summarize_history
+from connx_ai import (
+    duration_seconds,
+    history_trends,
+    redact_history,
+    request_ai_analysis,
+    summarize_history,
+)
 from connx_platform import (
     analysis_jobs,
     consume_analysis_quota,
     consume_login_attempt,
     delete_connx_token,
+    load_connx_refresh_token,
     load_connx_token,
     read_json_string_list,
     read_secret,
@@ -43,6 +50,8 @@ from connx_platform import (
 
 # The server's REST namespace is ``/api/svr`` (not ``/api/srv``).
 LOGIN_PATH = "/api/svr/security/login"
+REFRESH_PATH = "/api/svr/security/refreshtoken"
+LOGOUT_PATH = "/api/svr/security/logout"
 
 
 load_dotenv()
@@ -665,6 +674,53 @@ def create_app() -> Flask:
         g.connx_access_token = token or ""
         return g.connx_access_token
 
+    def token_value(data: dict[str, Any], *names: str) -> str:
+        for name in names:
+            value = data.get(name)
+            if value:
+                return str(value)
+        return ""
+
+    def refresh_connx_session() -> bool:
+        handle = session.get("connx_session_handle", "")
+        refresh_token = load_connx_refresh_token(app.config["ANALYSIS_DB_PATH"], handle)
+        if not refresh_token:
+            return False
+        try:
+            response = requests.request(
+                "POST",
+                urljoin(f"{app.config['CONNX_BASE_URL']}/", REFRESH_PATH.lstrip("/")),
+                headers={"Accept": "application/json"},
+                json={"refreshToken": refresh_token},
+                timeout=app.config["REQUEST_TIMEOUT"],
+                verify=verify_tls(),
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("The refresh response was not a JSON object.")
+            new_access_token = token_value(
+                data, "accessToken", "access_token", "token"
+            )
+            if not new_access_token:
+                raise ValueError("The refresh response did not contain an access token.")
+            new_refresh_token = token_value(
+                data, "refreshToken", "refresh_token"
+            ) or refresh_token
+            new_handle = store_connx_token(
+                app.config["ANALYSIS_DB_PATH"],
+                new_access_token,
+                refresh_token=new_refresh_token,
+                ttl_seconds=app.config["CONNX_SESSION_TTL_SECONDS"],
+                previous_handle=handle,
+            )
+            session["connx_session_handle"] = new_handle
+            g.connx_access_token = new_access_token
+            return True
+        except (requests.RequestException, ValueError) as exc:
+            log_private_error("CONNX token refresh failed", exc)
+            return False
+
     def remember_analysis(analysis_id: int) -> None:
         analysis_ids = [
             value for value in session.get("analysis_ids", []) if isinstance(value, int)
@@ -747,6 +803,7 @@ def create_app() -> Flask:
         path: str,
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        allow_refresh: bool = True,
     ) -> requests.Response:
         if not app.config["CONNX_BASE_URL"]:
             raise ValueError("CONNX_BASE_URL is not configured.")
@@ -755,7 +812,7 @@ def create_app() -> Flask:
         headers = {"Accept": "application/json"}
         if token := access_token():
             headers["Authorization"] = f"bearer {token}"
-        return requests.request(
+        response = requests.request(
             method,
             urljoin(f"{app.config['CONNX_BASE_URL']}/", path.lstrip("/")),
             headers=headers,
@@ -764,6 +821,23 @@ def create_app() -> Flask:
             timeout=app.config["REQUEST_TIMEOUT"],
             verify=verify_tls(),
         )
+        if (
+            allow_refresh
+            and response.status_code == 401
+            and path not in {LOGIN_PATH, REFRESH_PATH, LOGOUT_PATH}
+            and refresh_connx_session()
+        ):
+            retry_headers = {**headers, "Authorization": f"bearer {access_token()}"}
+            response = requests.request(
+                method,
+                urljoin(f"{app.config['CONNX_BASE_URL']}/", path.lstrip("/")),
+                headers=retry_headers,
+                json=body,
+                params=params,
+                timeout=app.config["REQUEST_TIMEOUT"],
+                verify=verify_tls(),
+            )
+        return response
 
     def get_json(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = call("GET", path, params=params)
@@ -801,6 +875,331 @@ def create_app() -> Flask:
         compact = " ".join(str(error).split())
         return compact if len(compact) <= 180 else f"{compact[:177]}…"
 
+    def first_value(data: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in data:
+                return data[key]
+        lowered = {key.lower(): value for key, value in data.items()}
+        for key in keys:
+            if key.lower() in lowered:
+                return lowered[key.lower()]
+        return None
+
+    def is_enabled(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "available"}
+        return bool(value)
+
+    def yes_no_status(value: Any) -> str:
+        return "Available" if is_enabled(value) else "Unavailable"
+
+    def optional_json(title: str, path: str) -> dict[str, Any]:
+        try:
+            return {"data": get_json(path), "error": ""}
+        except requests.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status in {401, 403, 404}:
+                return {
+                    "data": {},
+                    "error": (
+                        f"{title} is not available for this session "
+                        f"(HTTP {status})."
+                    ),
+                }
+            reference = log_private_error(f"Unable to load {title}", exc)
+            return {
+                "data": {},
+                "error": f"{title} is temporarily unavailable. Reference {reference}.",
+            }
+        except (requests.RequestException, ValueError) as exc:
+            reference = log_private_error(f"Unable to load {title}", exc)
+            return {
+                "data": {},
+                "error": f"{title} is temporarily unavailable. Reference {reference}.",
+            }
+
+    def list_value(data: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+        value = first_value(data, *keys)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        for container_key in (
+            "ObjectCollection",
+            "objectCollection",
+            "ScheduleList",
+            "scheduleList",
+        ):
+            nested = first_value(data, container_key)
+            if isinstance(nested, dict):
+                nested_value = first_value(nested, *keys)
+                if isinstance(nested_value, list):
+                    return [item for item in nested_value if isinstance(item, dict)]
+        return []
+
+    def text_value(row: dict[str, Any], *keys: str) -> str:
+        value = first_value(row, *keys)
+        return "" if value is None or value == "" else str(value)
+
+    def truthy_value(row: dict[str, Any], *keys: str, default: bool = False) -> bool:
+        value = first_value(row, *keys)
+        return default if value is None else is_enabled(value)
+
+    def datasync_environment() -> dict[str, Any]:
+        try:
+            data = get_json("/api/ds/env")
+            messages = first_value(
+                data,
+                "transformLicenseMessages",
+                "TransformLicenseMessages",
+            )
+            if isinstance(messages, str):
+                license_messages = [messages] if messages.strip() else []
+            elif isinstance(messages, list):
+                license_messages = [
+                    str(message)
+                    for message in messages
+                    if str(message).strip()
+                ]
+            else:
+                license_messages = []
+            connected = is_enabled(first_value(data, "isconnected", "isConnected"))
+            datasync_available = is_enabled(
+                first_value(data, "dataSyncAvailable", "DataSyncAvailable")
+            )
+            transforms_available = is_enabled(
+                first_value(data, "transformsAvailable", "TransformsAvailable")
+            )
+            return {
+                "state": (
+                    "healthy"
+                    if connected and datasync_available and transforms_available
+                    else "warning"
+                ),
+                "cdd_name": first_value(data, "CDDName", "cddName") or "Not reported",
+                "checks": [
+                    ("CDD connection", yes_no_status(connected)),
+                    ("DataSync", yes_no_status(datasync_available)),
+                    ("Transforms", yes_no_status(transforms_available)),
+                ],
+                "license_messages": license_messages,
+                "error": "",
+            }
+        except (requests.RequestException, ValueError) as exc:
+            reference = log_private_error("Unable to load DataSync environment", exc)
+            return {
+                "state": "unavailable",
+                "cdd_name": "Unavailable",
+                "checks": [],
+                "license_messages": [],
+                "error": f"DataSync environment is unavailable. Reference {reference}.",
+            }
+
+    def schedule_insights() -> dict[str, Any]:
+        result = optional_json("Schedule health", "/api/object/schedules")
+        if result["error"]:
+            return {"error": result["error"], "metrics": [], "rows": []}
+        schedules = list_value(
+            result["data"], "ScheduleItems", "scheduleItems", "ItemList", "items"
+        )
+        rows = []
+        for schedule in schedules[:25]:
+            name = text_value(schedule, "Name", "name")
+            item_type = text_value(schedule, "ItemType", "itemtype", "type")
+            item_name = text_value(schedule, "ItemName", "itemname", "SyncObjectName")
+            enabled = truthy_value(schedule, "Enabled", "enabled", default=True)
+            uses_trigger = truthy_value(schedule, "UseTriggerFile", "useTriggerFile")
+            has_tasks = any(
+                text_value(schedule, key)
+                for key in ("BeforeSyncTask", "OnSuccessTask", "OnFailureTask")
+            )
+            rows.append(
+                {
+                    "name": name or item_name or "Unnamed schedule",
+                    "item": item_name or "Not reported",
+                    "item_type": item_type or "Unknown",
+                    "sync_type": text_value(schedule, "SyncType", "synctype") or "Not reported",
+                    "cadence": " / ".join(
+                        value
+                        for value in (
+                            text_value(schedule, "DateFrequency", "dateFrequency"),
+                            text_value(schedule, "TimeFrequency", "timeFrequency"),
+                        )
+                        if value
+                    )
+                    or "Not reported",
+                    "enabled": yes_no_status(enabled),
+                    "trigger": yes_no_status(uses_trigger),
+                    "dependencies": yes_no_status(has_tasks),
+                    "end_date": text_value(schedule, "EndDate", "endDate") or "None",
+                }
+            )
+        metrics = [
+            ("Schedules", len(schedules)),
+            ("Enabled", sum(1 for row in rows if row["enabled"] == "Available")),
+            ("Trigger files", sum(1 for row in rows if row["trigger"] == "Available")),
+            ("Task hooks", sum(1 for row in rows if row["dependencies"] == "Available")),
+        ]
+        return {"error": "", "metrics": metrics, "rows": rows}
+
+    def object_key(item_type: str, item_name: str) -> str:
+        return f"{item_type.strip().lower()}:{item_name.strip().casefold()}"
+
+    def inventory_insights(
+        *,
+        schedules: dict[str, Any],
+        table_rows: list[dict[str, Any]],
+        group_rows: list[dict[str, Any]],
+        transform_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        result = optional_json("Syncable inventory", "/api/object/allobjects")
+        if result["error"]:
+            return {"error": result["error"], "metrics": [], "stale": []}
+        objects = list_value(result["data"], "ItemList", "ObjectList", "items")
+        counts = {"Table": 0, "Group": 0, "Transform": 0, "Other": 0}
+        scheduled = {
+            object_key(row["item_type"], row["item"])
+            for row in schedules.get("rows", [])
+            if row.get("item") and row.get("item") != "Not reported"
+        }
+        scheduled_count = 0
+        for item in objects:
+            item_type = text_value(item, "ItemType", "itemtype", "type") or "Other"
+            item_name = text_value(
+                item, "ItemName", "itemname", "Name", "name", "table", "groupname"
+            )
+            normalized_type = item_type.capitalize()
+            if normalized_type not in counts:
+                normalized_type = "Other"
+            counts[normalized_type] += 1
+            if item_name and object_key(item_type, item_name) in scheduled:
+                scheduled_count += 1
+        asset_rows = [*table_rows, *group_rows, *transform_rows]
+        stale = []
+        recurring_failures = 0
+        never_run = 0
+        for row in asset_rows:
+            status = text_value(row, "laststatus").lower()
+            started = text_value(row, "laststarttime")
+            if not started:
+                never_run += 1
+            if status in {"failure", "failed", "false"}:
+                recurring_failures += 1
+                stale.append(
+                    {
+                        "name": text_value(
+                            row,
+                            "table",
+                            "groupname",
+                            "transformname",
+                            "itemname",
+                        )
+                        or "Unknown",
+                        "status": text_value(row, "laststatus") or "Unknown",
+                        "started": started or "Never",
+                    }
+                )
+        total_objects = len(objects)
+        metrics = [
+            ("Syncable objects", total_objects),
+            ("Tables", counts["Table"]),
+            ("Groups", counts["Group"]),
+            ("Transforms", counts["Transform"]),
+            ("Scheduled", scheduled_count),
+            ("Unscheduled", max(total_objects - scheduled_count, 0)),
+            ("Never run", never_run),
+            ("Failed last sync", recurring_failures),
+        ]
+        return {"error": "", "metrics": metrics, "stale": stale[:10]}
+
+    def percentile(values: list[float], percent: float) -> float:
+        if not values:
+            return 0
+        ordered = sorted(values)
+        index = (len(ordered) - 1) * percent
+        lower = int(index)
+        upper = min(lower + 1, len(ordered) - 1)
+        if lower == upper:
+            return ordered[lower]
+        return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
+
+    def analytics_insights(history_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        durations = [duration_seconds(row.get("duration")) for row in history_rows]
+        rows_processed = []
+        failures_by_error: dict[str, int] = {}
+        sync_mix: dict[str, int] = {}
+        for row in history_rows:
+            try:
+                rows_processed.append(int(row.get("processedrows") or 0))
+            except (TypeError, ValueError):
+                rows_processed.append(0)
+            sync_type = text_value(row, "synctype") or "Unknown"
+            sync_mix[sync_type] = sync_mix.get(sync_type, 0) + 1
+            if str(row.get("success", "")).lower() not in {"true", "1", "yes", "success"}:
+                signature = text_value(row, "error_summary", "error") or "Unspecified failure"
+                failures_by_error[signature] = failures_by_error.get(signature, 0) + 1
+        total_duration = sum(durations)
+        total_rows = sum(rows_processed)
+        metrics = [
+            ("Median duration", round(percentile(durations, 0.50), 1)),
+            ("95th percentile duration", round(percentile(durations, 0.95), 1)),
+            ("Processed rows", total_rows),
+            (
+                "Rows/sec",
+                round(total_rows / total_duration, 1) if total_duration else 0,
+            ),
+        ]
+        return {
+            "metrics": metrics,
+            "sync_mix": sorted(sync_mix.items()),
+            "failures": sorted(
+                failures_by_error.items(), key=lambda item: item[1], reverse=True
+            )[:5],
+        }
+
+    def config_posture() -> dict[str, Any]:
+        result = optional_json("DataSync configuration", "/api/config/settings")
+        if result["error"]:
+            return {"error": result["error"], "settings": []}
+        data = result["data"]
+        nested_settings = first_value(data, "settings", "Settings")
+        if isinstance(nested_settings, dict):
+            data = nested_settings
+        safe_fields = [
+            ("Max worker threads", "maxworkerthreads", "MaxWorkerThreads"),
+            ("History retention days", "historydays", "HistoryDays"),
+            ("Batch size", "batchsize", "BatchSize"),
+            ("Full reload threshold", "fullreloadthreshold", "FullReloadThreshold"),
+            ("Retry failed syncs", "retryfailedsyncs", "RetryFailedSyncs"),
+            ("Retry count", "retrycount", "RetryCount"),
+            ("Drop on full reload", "droponfull", "DropOnFull"),
+            ("Delete on purge", "deleteonpurge", "DeleteOnPurge"),
+            ("Add CNXSYNCDATE", "addcnxsyncdate", "AddCnxSyncDate"),
+            ("Disable logging", "disablelogging", "DisableLogging"),
+        ]
+        settings = []
+        for label, *keys in safe_fields:
+            value = first_value(data, *keys)
+            if value is not None and value != "":
+                settings.append((label, str(value)))
+        return {"error": "", "settings": settings}
+
+    def server_metadata() -> dict[str, Any]:
+        result = optional_json("Server environment", "/api/svr/env")
+        if result["error"]:
+            return {"error": result["error"], "metadata": []}
+        data = result["data"]
+        safe_fields = [
+            ("Version", "version", "Version"),
+            ("Server time", "currentTime", "CurrentTime"),
+            ("Timezone", "timezone", "TimeZone"),
+            ("Client timeout", "clientTimeout", "ClientTimeout"),
+        ]
+        metadata = []
+        for label, *keys in safe_fields:
+            value = first_value(data, *keys)
+            if value is not None and value != "":
+                metadata.append((label, str(value)))
+        return {"error": "", "metadata": metadata}
+
     @app.get("/")
     def index():
         if access_token():
@@ -837,7 +1236,15 @@ def create_app() -> Flask:
             try:
                 data = get_json(path, params)
                 rows = [{**row, "error_summary": error_summary(row)} for row in data.get(list_key, []) if isinstance(row, dict)]
-                return {"title": title, "columns": columns, "rows": rows, "total": data.get("TotalNumberOfMatches")}
+                return {
+                    "title": title,
+                    "columns": columns,
+                    "rows": rows,
+                    "total": data.get("TotalNumberOfMatches"),
+                    "successes": data.get("NumberOfSuccess"),
+                    "failures": data.get("NumberOfFailures"),
+                    "last_page": data.get("LastPageFlag"),
+                }
             except (requests.RequestException, ValueError) as exc:
                 reference = log_private_error(f"Unable to load {title}", exc)
                 return {
@@ -849,18 +1256,42 @@ def create_app() -> Flask:
 
         overview: list[tuple[str, Any]] = []
         running_columns = [("itemname", "Item"), ("itemtype", "Type"), ("currentaction", "Action"), ("processid", "Process"), ("elapsedtime", "Elapsed"), ("progresspercent", "Progress %")]
+        running_process_columns = [
+            ("itemname", "Item"),
+            ("itemtype", "Type"),
+            ("rowsprocessed", "Rows"),
+            ("processid", "Process"),
+            ("starttime", "Started"),
+            ("elapsedtime", "Elapsed"),
+            ("estimatedcompletiontime", "ETA"),
+        ]
         try:
             running = get_json("/api/status/runningjobs")
             overview = [("Active syncs", running.get("ActiveSyncs", 0)), ("Queued", running.get("QueuedSyncs", 0)), ("Completed", running.get("CompletedSyncs", 0)), ("Records/sec", running.get("RecordsPerSecond", 0)), ("MB/sec", running.get("DataVolumeVelocity", 0))]
-            running_panel = {"title": "Running threads", "columns": running_columns, "rows": running.get("RunningThreads", [])}
+            running_panel = {
+                "title": "Running threads",
+                "columns": running_columns,
+                "rows": running.get("RunningThreads", []),
+                "process_columns": running_process_columns,
+                "processes": running.get("RunningProcesses", []),
+                "high_water": [
+                    ("Records/sec high-water", running.get("RecordsPerSecondHighWater", 0)),
+                    ("MB/sec high-water", running.get("DataVolumeVelocityHighWater", 0)),
+                ],
+            }
         except (requests.RequestException, ValueError) as exc:
             reference = log_private_error("Unable to load running threads", exc)
             running_panel = {
                 "title": "Running threads",
                 "columns": running_columns,
                 "rows": [],
+                "process_columns": running_process_columns,
+                "processes": [],
+                "high_water": [],
                 "error": f"Data is temporarily unavailable. Reference {reference}.",
             }
+
+        datasync_env = datasync_environment()
 
         history_params = nonempty_params(
             SearchPattern=filters["search"],
@@ -876,7 +1307,9 @@ def create_app() -> Flask:
         history_total = history_panel.get("total")
         history_page_number = int(filters["page"])
         has_next_page = (
-            history_page_number * app.config["AI_HISTORY_LIMIT"] < history_total
+            not history_panel["last_page"]
+            if isinstance(history_panel.get("last_page"), bool)
+            else history_page_number * app.config["AI_HISTORY_LIMIT"] < history_total
             if isinstance(history_total, int)
             else len(history_panel["rows"]) == app.config["AI_HISTORY_LIMIT"]
         )
@@ -893,11 +1326,21 @@ def create_app() -> Flask:
         }
         failure_panel = panel("Failed jobs", "/api/status/completedjobs", "JobList", history_columns, {**history_params, "StatusSearchPattern": "failure"})
         if overview:
-            overview.insert(0, ("Failures", failure_panel.get("total", 0)))
+            overview.insert(0, ("Failures", history_panel.get("failures", failure_panel.get("total", 0))))
 
         table_panel = panel("Tables — last sync", "/api/object/tableswithstatus", "TableList", [("catalog", "Catalog"), ("schema", "Schema"), ("table", "Table"), ("laststatus", "Status"), ("lastsynctype", "Sync type"), ("laststarttime", "Started"), ("lastduration", "Duration"), ("lastprocessedrows", "Rows"), ("error_summary", "Error")], nonempty_params(TableSearchPattern=filters["search"], StatusSearchPattern=filters["status"], Pagination="false"))
         group_panel = panel("Groups — last sync", "/api/object/groupswithstatus", "GroupList", [("groupname", "Group"), ("laststatus", "Status"), ("lastsynctype", "Sync type"), ("laststarttime", "Started"), ("lastduration", "Duration"), ("lastprocessedrows", "Rows"), ("error_summary", "Error")], nonempty_params(GroupSearchPattern=filters["search"], StatusSearchPattern=filters["status"]))
         transform_panel = panel("Transforms — last sync", "/api/object/transformswithstatus", "TransformList", [("transformname", "Transform"), ("targettablename", "Target table"), ("laststatus", "Status"), ("lastsynctype", "Sync type"), ("laststarttime", "Started"), ("lastduration", "Duration"), ("lastprocessedrows", "Rows"), ("error_summary", "Error")], nonempty_params(TransformSearchPattern=filters["search"], StatusSearchPattern=filters["status"]))
+        schedules = schedule_insights()
+        inventory = inventory_insights(
+            schedules=schedules,
+            table_rows=table_panel["rows"],
+            group_rows=group_panel["rows"],
+            transform_rows=transform_panel["rows"],
+        )
+        reliability = analytics_insights(history_panel["rows"])
+        configuration = config_posture()
+        server_environment = server_metadata()
         ai_configured = bool(
             app.config["AZURE_OPENAI_ENDPOINT"]
             and app.config["AZURE_OPENAI_DEPLOYMENT"]
@@ -1104,6 +1547,12 @@ def create_app() -> Flask:
             base_url=app.config["CONNX_BASE_URL"],
             filters=filters,
             overview=overview,
+            datasync_env=datasync_env,
+            schedules=schedules,
+            inventory=inventory,
+            reliability=reliability,
+            configuration=configuration,
+            server_environment=server_environment,
             failures=failure_panel.get("rows", []),
             panels=[running_panel, history_panel, table_panel, group_panel, transform_panel],
             pagination=pagination,
@@ -1342,13 +1791,15 @@ def create_app() -> Flask:
             data = response.json()
             # CONNX REST Server returns accessToken; keep the other spellings
             # for compatibility with deployments that use them.
-            token = data.get("accessToken") or data.get("access_token") or data.get("token")
+            token = token_value(data, "accessToken", "access_token", "token")
             if not token:
                 raise ValueError("The login response did not contain an access token.")
+            refresh_token = token_value(data, "refreshToken", "refresh_token")
             old_handle = session.get("connx_session_handle", "")
             handle = store_connx_token(
                 app.config["ANALYSIS_DB_PATH"],
                 token,
+                refresh_token=refresh_token,
                 ttl_seconds=app.config["CONNX_SESSION_TTL_SECONDS"],
                 previous_handle=old_handle,
             )
@@ -1369,8 +1820,21 @@ def create_app() -> Flask:
 
     @app.post("/logout")
     def logout():
+        handle = session.get("connx_session_handle", "")
+        token = load_connx_token(app.config["ANALYSIS_DB_PATH"], handle) or ""
+        refresh_token = load_connx_refresh_token(app.config["ANALYSIS_DB_PATH"], handle) or ""
+        if token or refresh_token:
+            try:
+                call(
+                    "POST",
+                    LOGOUT_PATH,
+                    {"accessToken": token, "refreshToken": refresh_token},
+                    allow_refresh=False,
+                ).raise_for_status()
+            except (requests.RequestException, ValueError) as exc:
+                log_private_error("CONNX logout failed", exc)
         delete_connx_token(
-            app.config["ANALYSIS_DB_PATH"], session.get("connx_session_handle", "")
+            app.config["ANALYSIS_DB_PATH"], handle
         )
         session.clear()
         flash("Session cleared.")

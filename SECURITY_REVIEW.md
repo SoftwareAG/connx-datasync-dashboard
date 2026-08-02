@@ -59,6 +59,23 @@ configuration, prevents dynamic response caching, and keeps upstream exception
 detail in correlated server logs. The remaining publication and repository
 governance tasks are maintained in `TODO.md`.
 
+## CONNX REST Swagger guardrails
+
+The dashboard intentionally uses read-only, customer-facing DataSync endpoints
+for monitoring, trend analysis, schedule coverage, inventory counts, safe
+configuration posture, and low-sensitivity server metadata. Optional endpoints
+must fail independently with compact unavailable states when the logged-in
+CONNX role lacks access.
+
+The following Swagger areas remain out of scope unless a separate product and
+security review approves a narrower design: cached CDD database account data,
+password-like fields, SMTP recipients, server filesystem paths, script/task
+paths, license-server infrastructure, SQL preview output, sync start/cancel
+actions, configuration writes, user/group administration, and CDD object
+mutation endpoints. If any of these areas are later exposed, the implementation
+must define role requirements, redaction rules, audit expectations, tests, and
+operator confirmation flows before code is merged.
+
 ## Positive controls observed
 
 The application uses CSRF protection, an origin-constrained CONNX request

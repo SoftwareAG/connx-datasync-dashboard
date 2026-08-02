@@ -38,6 +38,7 @@ def store_connx_token(
     access_token: str,
     *,
     ttl_seconds: int,
+    refresh_token: str = "",
     previous_handle: str = "",
     now: datetime | None = None,
 ) -> str:
@@ -51,13 +52,7 @@ def store_connx_token(
     path.chmod(0o600)
     with closing(sqlite3.connect(database_path, timeout=10)) as connection:
         with connection:
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS connx_sessions (
-                       handle TEXT PRIMARY KEY,
-                       access_token TEXT NOT NULL,
-                       expires_at TEXT NOT NULL
-                   )"""
-            )
+            ensure_connx_session_schema(connection)
             connection.execute(
                 "DELETE FROM connx_sessions WHERE expires_at <= ?", (current.isoformat(),)
             )
@@ -66,10 +61,33 @@ def store_connx_token(
                     "DELETE FROM connx_sessions WHERE handle = ?", (previous_handle,)
                 )
             connection.execute(
-                "INSERT INTO connx_sessions(handle, access_token, expires_at) VALUES (?, ?, ?)",
-                (handle, access_token, expires_at),
+                """INSERT INTO connx_sessions
+                       (handle, access_token, refresh_token, expires_at)
+                   VALUES (?, ?, ?, ?)""",
+                (handle, access_token, refresh_token, expires_at),
             )
     return handle
+
+
+def ensure_connx_session_schema(connection: sqlite3.Connection) -> None:
+    """Create or migrate the server-side CONNX session table."""
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS connx_sessions (
+               handle TEXT PRIMARY KEY,
+               access_token TEXT NOT NULL,
+               refresh_token TEXT NOT NULL DEFAULT '',
+               expires_at TEXT NOT NULL
+           )"""
+    )
+    columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(connx_sessions)").fetchall()
+    }
+    if "refresh_token" not in columns:
+        connection.execute(
+            "ALTER TABLE connx_sessions "
+            "ADD COLUMN refresh_token TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def load_connx_token(
@@ -81,6 +99,7 @@ def load_connx_token(
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
     with closing(sqlite3.connect(database_path, timeout=10)) as connection:
         try:
+            ensure_connx_session_schema(connection)
             row = connection.execute(
                 "SELECT access_token, expires_at FROM connx_sessions WHERE handle = ?",
                 (handle,),
@@ -94,6 +113,31 @@ def load_connx_token(
                 connection.execute("DELETE FROM connx_sessions WHERE handle = ?", (handle,))
             return None
         return str(row[0])
+
+
+def load_connx_refresh_token(
+    database_path: str, handle: str, *, now: datetime | None = None
+) -> str | None:
+    """Return an unexpired server-side CONNX refresh token for an opaque handle."""
+    if not handle or not Path(database_path).exists():
+        return None
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    with closing(sqlite3.connect(database_path, timeout=10)) as connection:
+        try:
+            ensure_connx_session_schema(connection)
+            row = connection.execute(
+                "SELECT refresh_token, expires_at FROM connx_sessions WHERE handle = ?",
+                (handle,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        if row[1] <= current:
+            with connection:
+                connection.execute("DELETE FROM connx_sessions WHERE handle = ?", (handle,))
+            return None
+        return str(row[0]) or None
 
 
 def delete_connx_token(database_path: str, handle: str) -> None:
