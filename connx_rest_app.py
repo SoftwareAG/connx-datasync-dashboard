@@ -87,6 +87,24 @@ def public_server_identity(value: str) -> str:
         return "Not configured"
     return f"{parsed.scheme or 'https'}://{host}{port}"
 
+
+def development_secret_key(instance_path: str) -> str:
+    """Keep local sessions stable without making production secrets implicit."""
+    path = Path(instance_path) / ".flask_secret_key"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.exists():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        value = secrets.token_urlsafe(48)
+        path.write_text(value + "\n", encoding="utf-8")
+        path.chmod(0o600)
+        return value
+    except OSError:
+        # Read-only development environments still get a usable ephemeral key.
+        return secrets.token_urlsafe(48)
+
 def save_analysis(
     database_path: str,
     *,
@@ -94,6 +112,7 @@ def save_analysis(
     filters: dict[str, str],
     stats: dict[str, int],
     analysis: dict[str, Any],
+    owner_principal: str = "",
 ) -> dict[str, Any]:
     """Persist analysis provenance without storing credentials or raw history."""
     path = Path(database_path)
@@ -109,10 +128,19 @@ def save_analysis(
                     deployment TEXT NOT NULL,
                     filters_json TEXT NOT NULL,
                     stats_json TEXT NOT NULL,
-                    analysis_json TEXT NOT NULL
+                    analysis_json TEXT NOT NULL,
+                    owner_principal TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(ai_analyses)").fetchall()
+            }
+            if "owner_principal" not in columns:
+                connection.execute(
+                    "ALTER TABLE ai_analyses ADD COLUMN owner_principal TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS finding_workflow (
@@ -131,8 +159,8 @@ def save_analysis(
             cursor = connection.execute(
                 """
                 INSERT INTO ai_analyses
-                    (created_at, deployment, filters_json, stats_json, analysis_json)
-                VALUES (?, ?, ?, ?, ?)
+                    (created_at, deployment, filters_json, stats_json, analysis_json, owner_principal)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -140,6 +168,7 @@ def save_analysis(
                     json.dumps(filters, separators=(",", ":")),
                     json.dumps(stats, separators=(",", ":")),
                     json.dumps(analysis, separators=(",", ":")),
+                    owner_principal,
                 ),
             )
     return {"id": cursor.lastrowid, "created_at": created_at, "deployment": deployment}
@@ -151,13 +180,29 @@ def load_analysis(database_path: str, analysis_id: int) -> dict[str, Any] | None
         return None
     with closing(sqlite3.connect(path)) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            """
-            SELECT id, created_at, deployment, filters_json, stats_json, analysis_json
-            FROM ai_analyses WHERE id = ?
-            """,
-            (analysis_id,),
-        ).fetchone()
+        try:
+            row = connection.execute(
+                """
+                SELECT id, created_at, deployment, filters_json, stats_json, analysis_json,
+                       owner_principal
+                FROM ai_analyses WHERE id = ?
+                """,
+                (analysis_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Upgrade databases created before ownership metadata was added.
+            try:
+                with connection:
+                    connection.execute(
+                        "ALTER TABLE ai_analyses ADD COLUMN owner_principal TEXT NOT NULL DEFAULT ''"
+                    )
+                row = connection.execute(
+                    "SELECT id, created_at, deployment, filters_json, stats_json, analysis_json, owner_principal "
+                    "FROM ai_analyses WHERE id = ?",
+                    (analysis_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return None
     if row is None:
         return None
     record = {
@@ -167,6 +212,7 @@ def load_analysis(database_path: str, analysis_id: int) -> dict[str, Any] | None
         "filters": json.loads(row["filters_json"]),
         "stats": json.loads(row["stats_json"]),
         "analysis": json.loads(row["analysis_json"]),
+        "owner_principal": row["owner_principal"] if "owner_principal" in row.keys() else "",
     }
     record["finding_workflow"] = load_finding_workflow(database_path, analysis_id)
     return record
@@ -255,7 +301,7 @@ def save_finding_workflow(
 
 
 def load_previous_analysis(
-    database_path: str, analysis_id: int, filters: dict[str, str]
+    database_path: str, analysis_id: int, filters: dict[str, str], owner_principal: str = ""
 ) -> dict[str, Any] | None:
     path = Path(database_path)
     if not path.exists():
@@ -266,19 +312,77 @@ def load_previous_analysis(
             """
             SELECT id FROM ai_analyses
             WHERE id < ? AND filters_json = ?
+              AND (? = '' OR owner_principal = ?)
             ORDER BY id DESC LIMIT 1
             """,
-            (analysis_id, filters_json),
+            (analysis_id, filters_json, owner_principal, owner_principal),
         ).fetchone()
     return load_analysis(database_path, row[0]) if row else None
 
 
-def list_analyses(database_path: str, analysis_ids: list[int]) -> list[dict[str, Any]]:
-    records = []
-    for analysis_id in reversed(analysis_ids[-50:]):
-        if record := load_analysis(database_path, analysis_id):
-            records.append(record)
-    return records
+def list_analyses(
+    database_path: str,
+    analysis_ids: list[int] | None = None,
+    *,
+    owner_principal: str = "",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    path = Path(database_path)
+    if not path.exists():
+        return []
+    with closing(sqlite3.connect(path)) as connection:
+        connection.row_factory = sqlite3.Row
+        try:
+            if owner_principal:
+                rows = connection.execute(
+                    "SELECT id FROM ai_analyses WHERE owner_principal = ? ORDER BY id DESC LIMIT ?",
+                    (owner_principal, limit),
+                ).fetchall()
+            else:
+                ids = [value for value in (analysis_ids or []) if isinstance(value, int)]
+                rows = []
+                for analysis_id in reversed(ids[-limit:]):
+                    rows.extend(
+                        connection.execute("SELECT id FROM ai_analyses WHERE id = ?", (analysis_id,)).fetchall()
+                    )
+        except sqlite3.OperationalError:
+            return []
+    return [record for row in rows if (record := load_analysis(database_path, row["id"]))]
+
+
+def claim_legacy_analyses(
+    database_path: str, analysis_ids: list[int], owner_principal: str
+) -> int:
+    """Migrate records created before ownership metadata was introduced."""
+    if not owner_principal or not analysis_ids:
+        return 0
+    path = Path(database_path)
+    if not path.exists():
+        return 0
+    with closing(sqlite3.connect(path)) as connection:
+        try:
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(ai_analyses)").fetchall()
+            }
+            if columns and "owner_principal" not in columns:
+                with connection:
+                    connection.execute(
+                        "ALTER TABLE ai_analyses ADD COLUMN owner_principal TEXT NOT NULL DEFAULT ''"
+                    )
+        except sqlite3.OperationalError:
+            return 0
+        placeholders = ",".join("?" for _ in analysis_ids)
+        with connection:
+            try:
+                cursor = connection.execute(
+                    f"UPDATE ai_analyses SET owner_principal = ? "
+                    f"WHERE owner_principal = '' AND id IN ({placeholders})",
+                    (owner_principal, *analysis_ids),
+                )
+            except sqlite3.OperationalError:
+                return 0
+    return cursor.rowcount
 
 
 def delete_analysis(database_path: str, analysis_id: int) -> bool:
@@ -479,7 +583,7 @@ def create_app() -> Flask:
     environment = os.environ.get("CONNX_ENVIRONMENT", "development").strip().lower()
     configured_database_path = os.environ.get("ANALYSIS_DB_PATH", "").strip()
     app.config.update(
-        SECRET_KEY=configured_secret_key or os.urandom(32),
+        SECRET_KEY=configured_secret_key or development_secret_key(app.instance_path),
         CONNX_ENVIRONMENT=environment,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE=(
@@ -730,10 +834,30 @@ def create_app() -> Flask:
         session["analysis_ids"] = analysis_ids[-50:]
         session["last_ai_analysis_id"] = analysis_id
 
-    def can_access_analysis(analysis_id: int) -> bool:
-        return analysis_id == session.get("last_ai_analysis_id") or analysis_id in session.get(
-            "analysis_ids", []
+    def persist_background_analysis(result: dict[str, Any]) -> None:
+        metadata = save_analysis(
+            app.config["ANALYSIS_DB_PATH"],
+            deployment=result["deployment"],
+            filters=result["filters"],
+            stats=result["stats"],
+            analysis=result["analysis"],
+            owner_principal=result.get("owner_principal", ""),
         )
+        result["analysis_id"] = metadata["id"]
+        result["created_at"] = metadata["created_at"]
+
+    def can_access_analysis(analysis_id: int) -> bool:
+        record = load_analysis(app.config["ANALYSIS_DB_PATH"], analysis_id)
+        if record is None:
+            return False
+        principal = analysis_principal()
+        if record.get("owner_principal") == principal:
+            return True
+        # One-time migration for records created before ownership metadata.
+        if not record.get("owner_principal") and analysis_id in session.get("analysis_ids", []):
+            claim_legacy_analyses(app.config["ANALYSIS_DB_PATH"], [analysis_id], principal)
+            return True
+        return False
 
     def saved_dashboard_url(anchor: str = "") -> str:
         saved = session.get("dashboard_filters", {})
@@ -1139,8 +1263,8 @@ def create_app() -> Flask:
         total_duration = sum(durations)
         total_rows = sum(rows_processed)
         metrics = [
-            ("Median duration", round(percentile(durations, 0.50), 1)),
-            ("95th percentile duration", round(percentile(durations, 0.95), 1)),
+            ("Median duration (s)", round(percentile(durations, 0.50), 1)),
+            ("95th percentile (s)", round(percentile(durations, 0.95), 1)),
             ("Processed rows", total_rows),
             (
                 "Rows/sec",
@@ -1149,6 +1273,7 @@ def create_app() -> Flask:
         ]
         return {
             "metrics": metrics,
+            "sample_size": len(history_rows),
             "sync_mix": sorted(sync_mix.items()),
             "failures": sorted(
                 failures_by_error.items(), key=lambda item: item[1], reverse=True
@@ -1366,17 +1491,21 @@ def create_app() -> Flask:
                 principal=analysis_principal(),
                 function=request_ai_analysis,
                 runtime_arguments={"api_key": app.config["AZURE_OPENAI_API_KEY"]},
+                completion_callback=persist_background_analysis,
             )
             ai_job_status = task["status"]
             if task["status"] == "complete":
                 completed = task["result"]
-                metadata = save_analysis(
-                    app.config["ANALYSIS_DB_PATH"],
-                    deployment=completed["deployment"],
-                    filters=completed["filters"],
-                    stats=completed["stats"],
-                    analysis=completed["analysis"],
-                )
+                metadata = {
+                    "id": completed.get("analysis_id"),
+                    "created_at": completed.get("created_at"),
+                    "deployment": completed["deployment"],
+                }
+                if not metadata["id"]:
+                    persist_background_analysis(completed)
+                    metadata.update(
+                        id=completed["analysis_id"], created_at=completed["created_at"]
+                    )
                 remember_analysis(metadata["id"])
                 session.pop("ai_analysis_task_id", None)
                 ai_job_status = "complete"
@@ -1401,7 +1530,8 @@ def create_app() -> Flask:
                     "deployment": persisted["deployment"],
                 }
                 baseline = load_previous_analysis(
-                    app.config["ANALYSIS_DB_PATH"], persisted["id"], persisted["filters"]
+                    app.config["ANALYSIS_DB_PATH"], persisted["id"], persisted["filters"],
+                    analysis_principal(),
                 )
                 if baseline:
                     ai_comparison = compare_analysis_stats(ai_stats, baseline)
@@ -1486,6 +1616,7 @@ def create_app() -> Flask:
                                 "deployment": app.config["AZURE_OPENAI_DEPLOYMENT"],
                                 "filters": analysis_filters,
                                 "stats": ai_stats,
+                                "owner_principal": analysis_principal(),
                             },
                             arguments={
                                 "endpoint": app.config["AZURE_OPENAI_ENDPOINT"],
@@ -1500,6 +1631,7 @@ def create_app() -> Flask:
                             runtime_arguments={
                                 "api_key": app.config["AZURE_OPENAI_API_KEY"]
                             },
+                            completion_callback=persist_background_analysis,
                         )
                         session["ai_analysis_task_id"] = task_id
                         ai_job_status = "pending"
@@ -1521,10 +1653,12 @@ def create_app() -> Flask:
                             filters=analysis_filters,
                             stats=ai_stats,
                             analysis=ai_analysis,
+                            owner_principal=analysis_principal(),
                         )
                         remember_analysis(ai_metadata["id"])
                         baseline = load_previous_analysis(
-                            app.config["ANALYSIS_DB_PATH"], ai_metadata["id"], analysis_filters
+                            app.config["ANALYSIS_DB_PATH"], ai_metadata["id"], analysis_filters,
+                            analysis_principal(),
                         )
                         if baseline:
                             ai_comparison = compare_analysis_stats(ai_stats, baseline)
@@ -1650,8 +1784,13 @@ def create_app() -> Flask:
         purge_expired_analyses(
             app.config["ANALYSIS_DB_PATH"], app.config["ANALYSIS_RETENTION_DAYS"]
         )
+        principal = analysis_principal()
+        claim_legacy_analyses(
+            app.config["ANALYSIS_DB_PATH"], session.get("analysis_ids", []), principal
+        )
         all_records = list_analyses(
-            app.config["ANALYSIS_DB_PATH"], session.get("analysis_ids", [])
+            app.config["ANALYSIS_DB_PATH"], owner_principal=principal,
+            limit=app.config["AI_HISTORY_LIMIT"]
         )
         search = request.args.get("search", "").strip()
         severity = request.args.get("severity", "").lower()
@@ -1808,7 +1947,6 @@ def create_app() -> Flask:
             session["verify_tls"] = verify_tls_setting
             session["connx_session_handle"] = handle
             session["analysis_principal"] = pseudonymous_value(payload["username"])
-            flash("Authenticated. The bearer token is stored in the server-side session.")
             return redirect(url_for("jobs"))
         except (requests.RequestException, ValueError) as exc:
             reference = log_private_error("CONNX sign-in failed", exc)
@@ -1837,7 +1975,6 @@ def create_app() -> Flask:
             app.config["ANALYSIS_DB_PATH"], handle
         )
         session.clear()
-        flash("Session cleared.")
         return redirect(url_for("index"))
 
     return app

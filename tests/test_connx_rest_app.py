@@ -141,6 +141,7 @@ class ConnxRestAppTests(unittest.TestCase):
             self.assertNotIn("access_token", state)
             handle = state["connx_session_handle"]
             self.assertEqual(len(state["analysis_principal"]), 64)
+            self.assertNotIn("_flashes", state)
         self.assertEqual(
             load_connx_token(client.application.config["ANALYSIS_DB_PATH"], handle), "abc"
         )
@@ -201,6 +202,8 @@ class ConnxRestAppTests(unittest.TestCase):
                 client.application.config["ANALYSIS_DB_PATH"], replacement_handle
             )
         )
+        with client.session_transaction() as state:
+            self.assertNotIn("_flashes", state)
 
     def test_server_side_token_expiration_and_cookie_security(self):
         app = self.make_app()
@@ -593,7 +596,7 @@ class ConnxRestAppTests(unittest.TestCase):
         self.assertIn(b"Nightly orders", result.data)
         self.assertIn(b"Task hooks", result.data)
         self.assertIn(b"Syncable objects", result.data)
-        self.assertIn(b"95th percentile duration", result.data)
+        self.assertIn(b"95th percentile (s)", result.data)
         self.assertIn(b"Max worker threads", result.data)
         self.assertIn(b"14.8.0", result.data)
         self.assertNotIn(b"/redacted/by/app", result.data)
@@ -1233,6 +1236,39 @@ class ConnxRestAppTests(unittest.TestCase):
                 "SELECT payload_json FROM ai_background_jobs WHERE id = ?", (job_id,)
             ).fetchone()[0]
         self.assertEqual(payload, "{}")
+
+    def test_durable_background_job_completion_callback_materializes_result(self):
+        app = self.make_app()
+        manager = DurableAnalysisJobManager(max_workers=1)
+        persisted = []
+
+        def callback(result):
+            persisted.append(result["analysis"])
+            result["analysis_id"] = 91
+
+        job_id = manager.submit(
+            lambda: {"status": "ready"},
+            database_path=app.config["ANALYSIS_DB_PATH"],
+            principal="operator",
+            metadata={"deployment": "model"},
+            arguments={},
+            completion_callback=callback,
+        )
+        outcome = {"status": "pending"}
+        for _ in range(200):
+            outcome = manager.take(
+                job_id,
+                database_path=app.config["ANALYSIS_DB_PATH"],
+                principal="operator",
+                function=lambda: {"status": "ready"},
+                completion_callback=callback,
+            )
+            if outcome["status"] != "pending":
+                break
+            time.sleep(0.01)
+        self.assertEqual(outcome["status"], "complete")
+        self.assertEqual(persisted, [{"status": "ready"}])
+        self.assertEqual(outcome["result"]["analysis_id"], 91)
 
     def test_durable_background_job_recovers_an_expired_worker_lease(self):
         app = self.make_app()

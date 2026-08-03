@@ -215,9 +215,13 @@ The response commonly contains `JobList` and summary fields
 
 CONNX installations may represent `duration` as numeric seconds, a decimal
 second string, `MM:SS`, `HH:MM:SS`, or `DD.HH:MM:SS`. The reference parser
-normalizes these forms before calculating median, 95th-percentile, and
-rows-per-second metrics. Treat unknown or blank durations as unavailable rather
-than guessing a unit.
+normalizes these forms to seconds before calculating the median, 95th-percentile,
+and rows-per-second metrics. The dashboard labels the duration cards `Median
+duration (s)` and `95th percentile (s)`, and reports the number of displayed
+completed jobs used for the calculation. Median means 50% of those jobs were at
+or below the value; p95 means 95% were at or below it and the slowest 5% took
+longer. Treat unknown or blank durations as unavailable rather than guessing a
+unit.
 
 ### 5. Read object-level synchronization status
 

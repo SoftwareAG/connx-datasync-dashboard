@@ -374,6 +374,7 @@ class DurableAnalysisJobManager:
         metadata: dict[str, Any],
         arguments: dict[str, Any],
         runtime_arguments: dict[str, Any] | None = None,
+        completion_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> str:
         """Persist and start a job without storing runtime-only secrets."""
         job_id = uuid.uuid4().hex
@@ -399,6 +400,7 @@ class DurableAnalysisJobManager:
             principal=principal,
             function=function,
             runtime_arguments=runtime_arguments or {},
+            completion_callback=completion_callback,
         )
         return job_id
 
@@ -410,6 +412,7 @@ class DurableAnalysisJobManager:
         principal: str,
         function: Callable[..., dict[str, Any]],
         runtime_arguments: dict[str, Any],
+        completion_callback: Callable[[dict[str, Any]], None] | None,
     ) -> None:
         with self._lock:
             current_future = self._futures.get(job_id)
@@ -455,6 +458,7 @@ class DurableAnalysisJobManager:
             function,
             payload,
             runtime_arguments,
+            completion_callback,
         )
         with self._lock:
             self._futures[job_id] = future
@@ -476,6 +480,7 @@ class DurableAnalysisJobManager:
         function: Callable[..., dict[str, Any]],
         payload: dict[str, Any],
         runtime_arguments: dict[str, Any],
+        completion_callback: Callable[[dict[str, Any]], None] | None,
     ) -> None:
         stop_heartbeat = threading.Event()
 
@@ -508,13 +513,17 @@ class DurableAnalysisJobManager:
         heartbeat.start()
         try:
             analysis = function(**payload["arguments"], **runtime_arguments)
-            result_json = json.dumps(
-                {**payload["metadata"], "analysis": analysis},
-                separators=(",", ":"),
-                default=str,
-            )
+            completed_result = {**payload["metadata"], "analysis": analysis}
             status = "complete"
             error = ""
+            if completion_callback is not None:
+                try:
+                    completion_callback(completed_result)
+                except Exception as exc:
+                    # The job result remains available even if application-level
+                    # materialization fails; the next request can retry it.
+                    error = f"completion persistence failed: {exc}"[:2000]
+            result_json = json.dumps(completed_result, separators=(",", ":"), default=str)
         except Exception as exc:
             result_json = ""
             status = "failed"
@@ -549,6 +558,7 @@ class DurableAnalysisJobManager:
         principal: str,
         function: Callable[..., dict[str, Any]],
         runtime_arguments: dict[str, Any] | None = None,
+        completion_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Read a job result or recover an abandoned job after its lease expires."""
         now = datetime.now(timezone.utc)
@@ -571,6 +581,7 @@ class DurableAnalysisJobManager:
             principal=principal,
             function=function,
             runtime_arguments=runtime_arguments or {},
+            completion_callback=completion_callback,
         )
         return {"status": "pending"}
 
