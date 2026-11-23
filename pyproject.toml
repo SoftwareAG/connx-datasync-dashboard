@@ -1,0 +1,18 @@
+[project]
+name = "connx-datasync-dashboard"
+version = "0.1.0"
+description = "Read-only CONNX Data Sync operations dashboard"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = "Apache-2.0"
+dependencies = [
+  "Flask>=3.1",
+  "requests>=2.31",
+  "openai>=1.66",
+  "azure-identity>=1.17",
+  "python-dotenv>=1.0",
+  "gunicorn>=23.0",
+]
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests"]

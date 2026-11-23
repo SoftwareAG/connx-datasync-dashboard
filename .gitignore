@@ -1,0 +1,51 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+.envrc
+.secrets/
+
+# Local planning
+TODO.md
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[codz]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Coverage and packaging output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+*.so
+
+# Flask and local database state
+instance/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Browser-test output
+tests/visual_actual/
+playwright-report/
+test-results/
+
+# Runtime output
+*.log
+*.pid
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db

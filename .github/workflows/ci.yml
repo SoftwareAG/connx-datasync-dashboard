@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      update_visual_baselines:
+        description: Generate reviewed Linux visual baselines as an artifact
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repository-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Reject whitespace errors
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            git show --check --format= HEAD
+          fi
+
+  server:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Run server tests
+        run: python -W error -m unittest tests.test_connx_rest_app -v
+      - name: Validate Gunicorn configuration
+        run: gunicorn --check-config --config gunicorn.conf.py wsgi:app
+      - name: Scan first-party Python
+        if: matrix.python-version == '3.13'
+        run: bandit -c pyproject.toml -r connx_ai.py connx_platform.py connx_rest_app.py wsgi.py
+      - name: Audit locked dependencies
+        if: matrix.python-version == '3.13'
+        run: pip-audit -r requirements.lock
+      - name: Review dependency licenses
+        if: matrix.python-version == '3.13'
+        run: pip-licenses --format=plain
+
+  browser:
+    runs-on: ubuntu-latest
+    env:
+      # Keep installation and test lookup on the same hermetic path.
+      PLAYWRIGHT_BROWSERS_PATH: "0"
+      VISUAL_BASELINE_FLAVOR: linux
+      UPDATE_VISUAL_BASELINES: >-
+        ${{ github.event_name == 'workflow_dispatch' &&
+            inputs.update_visual_baselines && '1' || '0' }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --require-hashes -r requirements.lock
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Run browser tests
+        run: python -W error -m unittest tests.test_browser_ui -v
+      - name: Upload visual failures
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: visual-failures
+          path: tests/visual_actual/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload generated Linux baselines
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          inputs.update_visual_baselines
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-visual-baselines
+          path: tests/visual_baselines/linux/
+          if-no-files-found: error
+          retention-days: 7

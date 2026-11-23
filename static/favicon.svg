@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>CONNX data synchronization</title>
+  <rect width="64" height="64" rx="14" fill="#102a43"/>
+  <path d="M18 21v22c0 4.4 6.3 8 14 8s14-3.6 14-8V21" fill="#0ea5a8"/>
+  <ellipse cx="32" cy="21" rx="14" ry="8" fill="#22d3ee"/>
+  <path d="M18 31c0 4.4 6.3 8 14 8s14-3.6 14-8M18 41c0 4.4 6.3 8 14 8s14-3.6 14-8" fill="none" stroke="#06283a" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M47 23a18 18 0 0 0-27-7" fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round"/>
+  <path d="m20 10 .2 8 7-3.8" fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M17 41a18 18 0 0 0 27 7" fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round"/>
+  <path d="m44 54-.2-8-7 3.8" fill="none" stroke="#f8fafc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

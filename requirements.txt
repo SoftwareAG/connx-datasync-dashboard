@@ -1,0 +1,10 @@
+Flask>=3.1
+requests>=2.31
+openai>=1.66
+azure-identity>=1.17
+python-dotenv>=1.0
+gunicorn>=23.0
+# For real DB2 support (optional, not required for demo):
+# ibm_db
+# ibm_db_sa
+# or jaydebeapi + JDBC driver

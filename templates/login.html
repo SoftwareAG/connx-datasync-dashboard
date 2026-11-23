@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% from 'macros.html' import icon %}
+{% block title %}Sign in · CONNX Operations{% endblock %}
+{% block content %}
+<div class="login-shell">
+  <section class="card surface login-card border-0" aria-labelledby="login-title">
+    <div class="card-body p-4 p-sm-5">
+      <div class="d-flex align-items-center gap-3 mb-4">
+        <span class="brand-mark login-brand">{{ icon('activity', 26) }}</span>
+        <div>
+          <p class="eyebrow mb-1">Data Sync</p>
+          <h1 class="h3 page-heading mb-0" id="login-title">Operations Console</h1>
+        </div>
+      </div>
+      <p class="text-body-secondary mb-4">Sign in with your Windows AD credentials to monitor job health, history, and AI recommendations.</p>
+      {% if not connx_configured %}<div class="alert alert-danger" role="alert"><strong>CONNX REST is not configured.</strong> Set <code>CONNX_BASE_URL</code> to the dedicated REST service origin before signing in.</div>{% endif %}
+      {% for message in get_flashed_messages() %}<div class="alert alert-warning" role="alert">{{ message }}</div>{% endfor %}
+      <form method="post" action="{{ url_for('login') }}" data-loading-form data-validate novalidate>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="username">Windows AD username</label>
+          <input class="form-control form-control-lg" id="username" name="username" autocomplete="username" placeholder="DOMAIN\username" minlength="3" required>
+          <div class="invalid-feedback">Enter your Windows AD username.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold" for="password">Password</label>
+          <div class="input-group input-group-lg"><input class="form-control" id="password" name="password" type="password" autocomplete="current-password" aria-describedby="password-toggle" required><button class="btn btn-outline-secondary" id="password-toggle" type="button" data-password-toggle aria-label="Show password">{{ icon('eye', 18) }} <span data-password-label>Show</span></button><div class="invalid-feedback">Enter your password.</div></div>
+        </div>
+        <button class="btn btn-primary btn-lg w-100" type="submit" data-loading-label="Signing in…" {% if not connx_configured %}disabled{% endif %}>Sign in securely</button>
+        <div class="accordion accordion-flush mt-3" id="connectionOptions">
+          <div class="accordion-item bg-transparent">
+            <h2 class="accordion-header">
+              <button class="accordion-button collapsed bg-transparent px-0 py-3 small" type="button" data-bs-toggle="collapse" data-bs-target="#advancedConnection" aria-expanded="false" aria-controls="advancedConnection">Advanced connection</button>
+            </h2>
+            <div id="advancedConnection" class="accordion-collapse collapse">
+              <div class="accordion-body px-0 pt-0">
+                <div class="form-check form-switch mb-2">
+                  <input class="form-check-input" type="checkbox" role="switch" name="verify_tls" id="verify-tls" {% if verify_tls %}checked{% endif %} {% if not allow_insecure_tls %}disabled{% endif %}>
+                  <label class="form-check-label" for="verify-tls">Verify TLS certificate</label>
+                </div>
+                {% if not allow_insecure_tls %}<div class="small text-body-secondary mb-2">TLS verification is enforced by the server.</div>{% endif %}
+                <div class="small text-body-secondary">Server<br><code>{{ base_url }}</code></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}

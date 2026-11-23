@@ -1,0 +1,67 @@
+{% from 'macros.html' import icon %}
+<aside class="offcanvas offcanvas-end help-about-panel" tabindex="-1" id="helpAbout" aria-labelledby="helpAboutLabel">
+  <div class="offcanvas-header border-bottom">
+    <div>
+      <p class="eyebrow mb-1">Operator guide</p>
+      <h2 class="offcanvas-title h4" id="helpAboutLabel">Help &amp; About</h2>
+    </div>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close Help and About"></button>
+  </div>
+  <div class="offcanvas-body p-0">
+    <div class="help-hero p-4 border-bottom">
+      <h3 class="h5">Quick start</h3>
+      <ol class="mb-0 ps-3">
+        <li class="mb-2">Filter the dashboard to the job names, status, type, and period you want to investigate.</li>
+        <li class="mb-2">Review failures and open <strong>View details</strong> for the complete read-only CONNX response.</li>
+        <li>Choose an analysis scope, run AI analysis, then assign and track the recommended follow-up.</li>
+      </ol>
+    </div>
+    <div class="accordion accordion-flush" id="helpAboutSections">
+      <section class="accordion-item">
+        <h3 class="accordion-header" id="helpDashboardHeading"><button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#helpDashboard" aria-expanded="true" aria-controls="helpDashboard">Using the dashboard</button></h3>
+        <div id="helpDashboard" class="accordion-collapse collapse show" aria-labelledby="helpDashboardHeading" data-bs-parent="#helpAboutSections"><div class="accordion-body">
+          <dl class="help-definitions mb-0">
+            <dt>Filters</dt><dd>Apply to job history, failure summaries, asset panels, exports, and the next AI analysis. Reset restores the default 24-hour view.</dd>
+            <dt>Status</dt><dd>Success means CONNX reported completion. Failure means the operation stopped; open its details before deciding on remediation.</dd>
+            <dt>Auto-refresh</dt><dd>Reloads every 30 seconds and persists in this browser. It pauses while you edit a field or have a panel or dialog open.</dd>
+            <dt>Exports</dt><dd>CSV exports filtered job history. Markdown and PDF exports contain saved AI findings and operator follow-up.</dd>
+            <dt>Finding follow-up</dt><dd>Use status, owner, notes, and a validated HTTP(S) runbook link to record the operational response.</dd>
+          </dl>
+        </div></div>
+      </section>
+      <section class="accordion-item">
+        <h3 class="accordion-header" id="helpAiHeading"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#helpAi" aria-expanded="false" aria-controls="helpAi">AI insights and data handling</button></h3>
+        <div id="helpAi" class="accordion-collapse collapse" aria-labelledby="helpAiHeading" data-bs-parent="#helpAboutSections"><div class="accordion-body" id="help-ai" tabindex="-1">
+          <div class="alert alert-info"><strong>Operator review is required.</strong> AI findings are recommendations, not automated changes or confirmed root causes.</div>
+          <h4 class="h6">Analysis scopes</h4>
+          <ul><li><strong>All filtered jobs</strong> uses every displayed matching record.</li><li><strong>Failures only</strong> excludes successful operations.</li><li><strong>Selected history rows</strong> sends only checked rows.</li></ul>
+          <h4 class="h6">What may be sent to Azure OpenAI</h4>
+          <p>A field-selected copy of up to <strong>{{ help_about.history_limit }}</strong> displayed jobs: outcome, object name and type, sync type, timestamps, duration, row counts, and the compact error summary. Dashboard credentials, bearer tokens, Azure keys, and operator follow-up are never included.</p>
+          <h4 class="h6">Current controls</h4>
+          <ul class="mb-0"><li>Redaction: <strong>{{ help_about.redaction }}</strong></li><li>Quota: <strong>{{ help_about.hourly_limit }}/hour</strong> and <strong>{{ help_about.daily_limit }}/24 hours</strong> per operator identity</li><li>Saved-analysis retention: <strong>{{ help_about.retention_days }} days</strong></li><li>Destination pre-flight: <strong>{{ help_about.preflight }}</strong></li></ul>
+        </div></div>
+      </section>
+      <section class="accordion-item">
+        <h3 class="accordion-header" id="helpTroubleshootingHeading"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#helpTroubleshooting" aria-expanded="false" aria-controls="helpTroubleshooting">Troubleshooting</button></h3>
+        <div id="helpTroubleshooting" class="accordion-collapse collapse" aria-labelledby="helpTroubleshootingHeading" data-bs-parent="#helpAboutSections"><div class="accordion-body">
+          <h4 class="h6">Login or connection failure</h4><p>Verify the server identity, TLS setting, Windows AD credentials, network access, and CONNX REST service availability.</p>
+          <h4 class="h6">Multiple tables fail together</h4><p>Correlate timestamps with destination availability, listener health, maintenance, restarts, and network events before changing individual mappings.</p>
+          <h4 class="h6">Destination pre-flight fails</h4><p>Resolve the configured health check first. When pre-flight is required, AI analysis is deliberately blocked until the endpoint recovers.</p>
+          <h4 class="h6">AI analysis does not start</h4><p>Confirm matching history exists, the deployment is configured, the requested scope contains rows, and the operator quota has not been reached.</p>
+        </div></div>
+      </section>
+      <section class="accordion-item">
+        <h3 class="accordion-header" id="helpAboutHeading"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#helpApplication" aria-expanded="false" aria-controls="helpApplication">About this application</button></h3>
+        <div id="helpApplication" class="accordion-collapse collapse" aria-labelledby="helpAboutHeading" data-bs-parent="#helpAboutSections"><div class="accordion-body" id="help-about-application" tabindex="-1">
+          <dl class="row small mb-3"><dt class="col-5">Version</dt><dd class="col-7">{{ help_about.version }}</dd><dt class="col-5">Build</dt><dd class="col-7">{{ help_about.build }}</dd><dt class="col-5">CONNX server</dt><dd class="col-7 text-break">{{ help_about.server_identity }}</dd><dt class="col-5">AI deployment</dt><dd class="col-7 text-break">{{ help_about.ai_deployment }}</dd><dt class="col-5">AI authentication</dt><dd class="col-7">{{ help_about.ai_auth_mode }}</dd></dl>
+          <p class="small text-body-secondary">Only non-secret operational metadata is shown here. Credentials, session tokens, API keys, and usernames are never displayed.</p>
+          {% if help_about.documentation_url or help_about.support_url or help_about.privacy_url %}<div class="d-grid gap-2">
+            {% if help_about.documentation_url %}<a class="btn btn-outline-primary" href="{{ help_about.documentation_url }}" target="_blank" rel="noopener noreferrer">{{ icon('info', 16) }} Documentation <span class="visually-hidden">(opens in a new tab)</span></a>{% endif %}
+            {% if help_about.support_url %}<a class="btn btn-outline-primary" href="{{ help_about.support_url }}" target="_blank" rel="noopener noreferrer">Support <span class="visually-hidden">(opens in a new tab)</span></a>{% endif %}
+            {% if help_about.privacy_url %}<a class="btn btn-outline-secondary" href="{{ help_about.privacy_url }}" target="_blank" rel="noopener noreferrer">Privacy information <span class="visually-hidden">(opens in a new tab)</span></a>{% endif %}
+          </div>{% else %}<div class="alert alert-light border mb-0">Support and documentation links have not been configured. Contact your application administrator.</div>{% endif %}
+        </div></div>
+      </section>
+    </div>
+  </div>
+</aside>
